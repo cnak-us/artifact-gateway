@@ -17,6 +17,13 @@ updates:
     labels:
       - dependencies
       - javascript
+    ignore:
+      # Tailwind v4 is a major rewrite (PostCSS plugin moved to
+      # @tailwindcss/postcss, JS config deprecated for CSS @theme,
+      # @tailwind directives replaced). Pin to v3 until we schedule the
+      # migration explicitly.
+      - dependency-name: "tailwindcss"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
