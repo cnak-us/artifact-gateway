@@ -1,0 +1,19 @@
+artifact-gateway
+artifact-gateway.exe
+*.log
+.env
+.env.local
+ui/dist
+ui/src/node_modules
+ui/src/dist
+ui/src/.vite
+coverage.out
+*.test
+certs/
+
+# Helm dependency downloads — repopulated by `helm dependency update`.
+# Chart.lock is committed for reproducibility; the resolved .tgz subcharts
+# and packaged charts are not.
+chart/charts/
+*.tgz
+/chart/values-do.yaml

@@ -1,0 +1,244 @@
+# artifact-gateway Helm chart — default values.
+# Single-source-of-truth for chart configuration. Override per environment
+# with values-dev.yaml / values-prod.yaml / etc.
+
+image:
+  repository: ghcr.io/cnak-us/artifact-gateway
+  # Empty tag falls back to Chart.AppVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+# - name: ghcr-secret
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+replicaCount: 1
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# Binary serves embedded UI from memory and writes nothing to disk —
+# readOnlyRootFilesystem is safe and enforced.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+  managementPort: 8090
+
+# Ingress carries the OCI traffic. The TLS hosts list MUST match
+# config.externalHostname exactly — see templates/ingress.yaml.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # Example for nginx + cert-manager:
+  #   nginx.ingress.kubernetes.io/proxy-body-size: "0"        # OCI blobs can be large
+  #   nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+  #   cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: artifacts.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  # - secretName: artifact-gateway-tls
+  #   hosts:
+  #     - artifacts.example.com
+
+# Non-secret runtime config (rendered into a ConfigMap and consumed via envFrom).
+config:
+  # The hostname customers type into `docker login`. MUST equal the
+  # ingress TLS SAN or OCI clients fail with x509: errors.
+  externalHostname: ""
+  # GitHub REST API endpoint for non-OCI download sources (releases, assets).
+  # Override for GitHub Enterprise Server (e.g. https://ghes.example.com/api/v3).
+  upstreamGitHubAPI: "https://api.github.com"
+  tokenTTLSeconds: 300
+  oidcAutoprovision: false
+  logLevel: "info"
+  logFormat: "json"
+
+# Postgres. Provide exactly one of `url` (inline) or `existingSecret`.
+# `existingSecret` is the production path — the secret must contain a key
+# named `existingSecretKey` (default `url`) holding the DSN.
+database:
+  url: ""
+  existingSecret: ""
+  existingSecretKey: "url"
+
+# NATS is optional. Empty url disables audit publish + license cache invalidation.
+nats:
+  url: ""
+  # K8s Secret with a `user.creds` key, mounted at /etc/nats-creds.
+  credentialsSecret: ""
+
+# Secret material.
+#   secrets.create=true  → chart renders a Secret from the inline values below.
+#   secrets.existingSecret set → chart mounts that secret instead, fields ignored.
+# Inline values are intended for dev. Production should set existingSecret and
+# manage rotation out of band.
+secrets:
+  create: true
+  existingSecret: ""
+  # 32 bytes, base64. AES-GCM KEK for stored ghcr PATs. Losing this bricks
+  # every encrypted column at rest. Generate with:
+  #   openssl rand -base64 32
+  kekBase64: ""
+  # Hex, ≥ 32 bytes. HMAC-SHA256 for admin/catalog session cookies.
+  sessionSigningKey: ""
+  # Hex, ≥ 32 bytes. HMAC-SHA256 for OCI bearer JWTs.
+  jwtSigningKey: ""
+  # Shared secret for internal service callers.
+  serviceToken: ""
+  # NATS password-auth token (used only when nats.url is set without creds).
+  natsAuthToken: ""
+
+# One-time bootstrap admin, rendered into the env Secret. Rotate after first login.
+# Leave both empty in environments where you'll create the first user via OIDC.
+bootstrapAdmin:
+  email: ""
+  password: ""
+
+# Pre-install/pre-upgrade Hook Job that runs the same image with MIGRATE_ONLY=true.
+migrateJob:
+  enabled: true
+  backoffLimit: 3
+
+metrics:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+
+networkPolicy:
+  enabled: false
+  # Additional CIDRs allowed for egress beyond default (DNS, ghcr, Postgres, NATS).
+  additionalEgress: []
+  # - cidr: 10.0.0.0/8
+  #   ports:
+  #     - port: 443
+  #       protocol: TCP
+
+# -----------------------------------------------------------------------------
+# Optional bundled Dex IdP (chart dependency: https://github.com/dexidp/helm-charts).
+# Off by default — most operators already run an OIDC provider. Flip
+# `dex.enabled=true` to deploy Dex alongside the gateway; values under `dex:`
+# are passed straight through to the upstream Dex subchart, so anything the
+# upstream chart accepts (image, ingress, resources, …) works here.
+#
+# After install you still need to register Dex as an OIDC provider in the
+# gateway admin UI (Name=dex, Issuer=<dex.config.issuer>, ClientID/Secret
+# from `dex.config.staticClients`). See DEX.md.
+#
+# Production checklist (see DEX.md §6):
+#   * Set `dex.config.storage.type: postgres` (or kubernetes) — the default
+#     `memory` storage loses signing keys on every pod restart.
+#   * Pin `dex.config.issuer` to a real, browser-reachable HTTPS URL and add
+#     `dex.ingress`.
+#   * Rotate the static client secret below.
+#   * Add real connectors under `dex.config.connectors` (GitHub/Google/OIDC/…)
+#     with credentials sourced from a Secret, not inline.
+# -----------------------------------------------------------------------------
+dex:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: dexidp/dex
+    tag: v2.41.1
+  service:
+    ports:
+      http:
+        port: 5556
+      grpc:
+        port: 5557
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts: []
+    # - host: dex.example.com
+    #   paths:
+    #     - path: /
+    #       pathType: Prefix
+    tls: []
+  # Inline Dex config rendered into a Secret by the upstream subchart.
+  # MUST be customized per environment — see commentary above.
+  config:
+    # Browser-reachable issuer URL. Override for production
+    # (e.g. https://dex.example.com). Must match what users see in the gateway
+    # admin UI's "Issuer URL" field.
+    issuer: "http://localhost:5556"
+    storage:
+      # Dev default: in-memory, loses signing keys on restart. Swap for
+      # `kubernetes` (CRDs) or `postgres` (config block required) in prod.
+      type: memory
+    web:
+      http: 0.0.0.0:5556
+    grpc:
+      addr: 0.0.0.0:5557
+    oauth2:
+      # Skip the upstream "Grant access?" screen between Dex and the gateway.
+      # Fine inside the trust boundary; revisit if Dex is multi-tenant.
+      skipApprovalScreen: true
+    # The single static client used by the gateway admin and catalog flows.
+    # Each redirect URI must match what the gateway sends — mirror
+    # config/dex.dev.yaml's URI list and adjust the host to your ingress.
+    staticClients:
+      - id: artifact-gateway
+        name: artifact-gateway
+        secret: dev-dex-client-secret
+        redirectURIs:
+          - http://localhost:8080/api/v1/auth/oidc/dex/callback
+          - http://localhost:8080/catalog/oidc/dex/callback
+    # Connectors are added per IdP (github/google/gitlab/oidc/saml/ldap).
+    # Source secrets from envFrom + a Kubernetes Secret rather than inlining.
+    connectors: []
+    # - type: github
+    #   id: github
+    #   name: GitHub
+    #   config:
+    #     clientID: $GITHUB_CLIENT_ID
+    #     clientSecret: $GITHUB_CLIENT_SECRET
+    #     redirectURI: http://localhost:5556/callback

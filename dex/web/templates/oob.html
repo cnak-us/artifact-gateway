@@ -1,0 +1,15 @@
+{{ template "header.html" . }}
+
+<div class="theme-panel">
+  <div class="theme-panel__icon">
+    <!-- MdContentCopy -->
+    <svg viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+      <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/>
+    </svg>
+  </div>
+  <h2 class="theme-heading">Authorization Code</h2>
+  <p class="theme-subheading">Copy this code and paste it into your application</p>
+  <input type="text" class="theme-form-input" value="{{ .Code }}" readonly style="text-align:center; font-family:'Roboto Mono', monospace; font-size:1.25rem; letter-spacing:0.1em; margin-top:1rem;"/>
+</div>
+
+{{ template "footer.html" . }}

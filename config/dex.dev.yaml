@@ -1,0 +1,92 @@
+# Dex shim for artifact-gateway dev. See DEX.md for the full setup.
+#
+# Auto-provisioning note: the gateway self-bootstraps a `dex` OIDC provider
+# row in its database on first boot when DEX_ISSUER_URL, DEX_CLIENT_ID, and
+# DEX_CLIENT_SECRET are all set (they are, via docker-compose.yml and `make dev`).
+# No manual provider creation in the admin UI is required — the static client
+# defined below under `staticClients` is automatically registered.
+issuer: http://localhost:5556
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+frontend:
+  issuer: "Artifact Gateway"
+  theme: artifact-gateway
+  dir: /srv/dex/web
+
+oauth2:
+  # Skip the "Grant access?" approval screen between user-auth and IdP-redirect.
+  # Fine for dev; revisit for production where you may want to keep it.
+  skipApprovalScreen: true
+
+# Built-in password database. Gives the Dex login page an "Email + Password"
+# form alongside the upstream-connector buttons (GitHub / Google / …), so the
+# dev stack is usable with zero external IdP setup — operators can log in as
+# admin@cnak.us with password "admin" out of the box.
+#
+# Mirrors cnak's dev setup (see /Users/wcrum/Coding/cnak-us/cnak/dex/config.yaml).
+# `admin@cnak.us` is registered as a static admin in the gateway's config (see
+# STATIC_ADMINS env or static-admins manifest), so this email gets role=admin
+# on first Dex sign-in without any extra DB seeding.
+enablePasswordDB: true
+staticPasswords:
+  - email: admin@cnak.us
+    # bcrypt of "admin" (cost 10). Dev only — rotate for production.
+    hash: $2a$10$U5xuZ105iOjzUZfCmt5Gl.n70rMg3tKsKF5ujvkxwrgnRAQOinUxG
+    username: admin
+    userID: 08a8684b-db88-4b73-90a9-3cd1661f5466
+
+# The gateway registers ONE static client and uses it from both the admin and
+# the catalog sides. Each redirect URI must match what the gateway sends —
+# include both http (make dev / make dev-dex) and https (make dev-https) variants.
+staticClients:
+  - id: artifact-gateway
+    name: artifact-gateway
+    secret: dev-dex-client-secret
+    redirectURIs:
+      - http://localhost:8080/api/v1/auth/oidc/dex/callback
+      - http://localhost:8080/catalog/oidc/dex/callback
+      - https://localhost:8080/api/v1/auth/oidc/dex/callback
+      - https://localhost:8080/catalog/oidc/dex/callback
+
+# Upstream connectors. Dex shows a chooser page when ≥2 connectors (or a
+# connector + the password DB) are configured. Each connector here is gated on
+# the matching env vars in docker-compose.yml's dex service block — if the env
+# vars are empty Dex still starts and the connector appears as a button, but
+# clicking it will fail at the upstream step until the operator configures the
+# OAuth app. The password-DB option above is always available.
+connectors:
+  - type: github
+    id: github
+    name: GitHub
+    config:
+      clientID: $GITHUB_CLIENT_ID
+      clientSecret: $GITHUB_CLIENT_SECRET
+      # This URI must be registered in the GitHub OAuth App's
+      # "Authorization callback URL" field.
+      redirectURI: http://localhost:5556/callback
+
+  # Google. Uncomment + set GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET in .env
+  # and docker-compose.yml's dex service block to enable. The Google OAuth
+  # client's "Authorized redirect URI" must be http://localhost:5556/callback.
+  # - type: oidc
+  #   id: google
+  #   name: Google
+  #   config:
+  #     issuer: https://accounts.google.com
+  #     clientID: $GOOGLE_CLIENT_ID
+  #     clientSecret: $GOOGLE_CLIENT_SECRET
+  #     redirectURI: http://localhost:5556/callback
+
+  # GitLab. Uncomment + set GITLAB_CLIENT_ID / GITLAB_CLIENT_SECRET to enable.
+  # - type: gitlab
+  #   id: gitlab
+  #   name: GitLab
+  #   config:
+  #     clientID: $GITLAB_CLIENT_ID
+  #     clientSecret: $GITLAB_CLIENT_SECRET
+  #     redirectURI: http://localhost:5556/callback

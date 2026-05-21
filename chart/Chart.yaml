@@ -1,0 +1,31 @@
+apiVersion: v2
+name: artifact-gateway
+description: Kubernetes-native OCI auth gateway that proxies ghcr.io for license-gated customer access
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.24.0-0"
+keywords:
+  - oci
+  - registry
+  - ghcr
+  - license
+  - cnak
+maintainers:
+  - name: cnak-us
+    url: https://github.com/cnak-us
+home: https://github.com/cnak-us/artifact-gateway
+sources:
+  - https://github.com/cnak-us/artifact-gateway
+icon: ""
+annotations:
+  category: Registry
+  artifacthub.io/license: Apache-2.0
+dependencies:
+  # Optional Dex IdP, gated by `dex.enabled`. Disabled by default — operators
+  # who already run an OIDC provider should leave this off and register their
+  # provider in the gateway admin UI directly. See DEX.md for the rationale.
+  - name: dex
+    version: ">=0.10.0"
+    repository: https://charts.dexidp.io
+    condition: dex.enabled

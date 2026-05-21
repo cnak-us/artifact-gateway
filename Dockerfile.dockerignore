@@ -1,0 +1,29 @@
+# Build context is the artifact-gateway repo root. Keep it tight — only what
+# the Dockerfile actually reads.
+
+# Build outputs and host caches that the multi-stage build rebuilds itself.
+ui/src/node_modules
+ui/dist
+ui/src/dist
+ui/src/.vite
+bin
+artifact-gateway
+artifact-gateway.exe
+
+# Local dev cruft.
+.git
+.gitignore
+.github
+.idea
+.vscode
+.DS_Store
+*.log
+.env
+.env.local
+coverage.out
+*.test
+
+# Docs / license — image labels already point at the source repo.
+*.md
+LICENSE
+NOTICE

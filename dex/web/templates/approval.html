@@ -1,0 +1,48 @@
+{{ template "header.html" . }}
+
+<div class="theme-panel">
+  <div class="theme-panel__icon">
+    <!-- MdShield -->
+    <svg viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/>
+    </svg>
+  </div>
+  <h2 class="theme-heading">Grant Access</h2>
+  <p class="theme-subheading">Review permissions requested by this application</p>
+
+  <hr class="theme-divider">
+  <div>
+    {{ if .Scopes }}
+    <div class="theme-heading--subtitle">{{ .Client }} is requesting the following permissions:</div>
+    <ul class="theme-list">
+      {{ range $scope := .Scopes }}
+      <li>{{ $scope }}</li>
+      {{ end }}
+    </ul>
+    {{ else }}
+    <div class="theme-heading--subtitle">{{ .Client }} has not requested any personal information</div>
+    {{ end }}
+  </div>
+  <hr class="theme-divider">
+
+  <div class="theme-btn-row">
+    <form method="post">
+      <input type="hidden" name="req" value="{{ .AuthReqID }}"/>
+      <input type="hidden" name="approval" value="rejected">
+      <button type="submit" class="dex-btn theme-btn--secondary">Cancel</button>
+    </form>
+    <form method="post">
+      <input type="hidden" name="req" value="{{ .AuthReqID }}"/>
+      <input type="hidden" name="approval" value="approve">
+      <button type="submit" class="dex-btn theme-btn--success">
+        <span class="dex-btn-icon--inline">
+          <!-- MdCheck -->
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+        </span>
+        <span class="dex-btn-text">Authorize</span>
+      </button>
+    </form>
+  </div>
+</div>
+
+{{ template "footer.html" . }}

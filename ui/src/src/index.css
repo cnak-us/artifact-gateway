@@ -1,0 +1,227 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --g-canvas: 251 251 251;
+    --g-primary: 255 255 255;
+    --g-secondary: 244 245 245;
+    --g-elevated: 255 255 255;
+
+    --g-text-primary: 36 41 46;
+    --g-text-secondary: rgba(36, 41, 46, 0.75);
+    --g-text-disabled: rgba(36, 41, 46, 0.65);
+    --g-text-link: 31 98 224;
+
+    --g-border-weak: rgba(36, 41, 46, 0.12);
+    --g-border-medium: rgba(36, 41, 46, 0.30);
+    --g-border-strong: rgba(36, 41, 46, 0.40);
+
+    --g-accent-main: 56 113 220;
+    --g-accent-text: 31 98 224;
+
+    --g-blue-main: 56 113 220;
+    --g-blue-text: 31 98 224;
+    --g-red-main: 224 34 110;
+    --g-red-text: 207 14 91;
+    --g-green-main: 27 133 94;
+    --g-green-text: 10 118 78;
+    --g-orange-main: 255 153 0;
+    --g-orange-text: 181 81 13;
+    --g-yellow-main: 242 204 12;
+    --g-yellow-text: 204 157 0;
+    --g-purple-main: 163 82 204;
+    --g-purple-text: 143 59 184;
+
+    --g-action-hover: rgba(36, 41, 46, 0.08);
+    --g-action-selected: rgba(36, 41, 46, 0.08);
+    --g-action-focus: rgba(36, 41, 46, 0.12);
+
+    --g-shadow-z1: 0px 1px 2px rgba(24, 26, 27, 0.2);
+    --g-shadow-z2: 0px 4px 8px rgba(24, 26, 27, 0.2);
+    --g-shadow-z3: 0px 13px 20px 1px rgba(24, 26, 27, 0.18);
+  }
+
+  .dark {
+    --g-canvas: 17 18 23;
+    --g-primary: 24 27 31;
+    --g-secondary: 34 37 43;
+    --g-elevated: 34 37 43;
+
+    --g-text-primary: 204 204 220;
+    --g-text-secondary: rgba(204, 204, 220, 0.78);
+    --g-text-disabled: rgba(204, 204, 220, 0.65);
+    --g-text-link: 110 159 255;
+
+    --g-border-weak: rgba(204, 204, 220, 0.12);
+    --g-border-medium: rgba(204, 204, 220, 0.20);
+    --g-border-strong: rgba(204, 204, 220, 0.30);
+
+    --g-accent-main: 61 113 217;
+    --g-accent-text: 110 159 255;
+
+    --g-blue-main: 61 113 217;
+    --g-blue-text: 110 159 255;
+    --g-red-main: 209 14 92;
+    --g-red-text: 255 82 134;
+    --g-green-main: 26 127 75;
+    --g-green-text: 108 207 142;
+    --g-orange-main: 255 153 0;
+    --g-orange-text: 251 173 55;
+    --g-yellow-main: 250 222 42;
+    --g-yellow-text: 255 238 82;
+    --g-purple-main: 184 119 217;
+    --g-purple-text: 202 149 229;
+
+    --g-action-hover: rgba(204, 204, 220, 0.16);
+    --g-action-selected: rgba(204, 204, 220, 0.12);
+    --g-action-focus: rgba(204, 204, 220, 0.16);
+
+    --g-shadow-z1: 0px 1px 2px rgba(1, 4, 9, 0.75);
+    --g-shadow-z2: 0px 4px 8px rgba(1, 4, 9, 0.75);
+    --g-shadow-z3: 0px 8px 24px rgb(1, 4, 9);
+  }
+
+  * {
+    @apply box-border;
+  }
+
+  html, body, #root {
+    height: 100%;
+  }
+
+  body {
+    @apply m-0 font-sans antialiased bg-g-canvas text-g-text;
+    font-family: 'Inter', Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+  }
+
+  code, pre, kbd {
+    font-family: 'Roboto Mono', monospace;
+  }
+}
+
+/* Component classes — wired to CNAK design tokens so legacy usages
+   (.btn / .input / .card / .chip / .table) stay visually consistent with
+   the rest of the product. New code should prefer the primitives in
+   src/components/, but these keep the surface from looking off-brand
+   when used directly in JSX. */
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded
+      bg-g-secondary text-g-text hover:bg-g-hover transition-colors
+      disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded
+      bg-g-accent-main text-white shadow-z1 hover:bg-g-accent-main/85 transition-colors
+      disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded
+      bg-transparent border border-g-red-main/30 text-g-red-text hover:bg-g-red-main/10 transition-colors
+      disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .input {
+    @apply w-full bg-g-secondary border border-g-border-medium rounded px-3 py-2 text-sm text-g-text
+      placeholder:text-g-text-disabled
+      focus:border-g-accent-main focus:outline-none focus:ring-2 focus:ring-g-accent-main/40
+      disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .label {
+    @apply block text-xs font-medium text-g-text-secondary mb-1.5;
+  }
+  .card {
+    @apply bg-g-primary border border-g-border-weak rounded;
+  }
+  .table {
+    @apply w-full text-sm border-collapse;
+  }
+  .table th {
+    @apply text-left text-[11px] font-semibold uppercase tracking-wider text-g-text-secondary
+      px-3 py-2 border-b border-g-border-weak bg-g-secondary;
+  }
+  .table td {
+    @apply px-3 py-2.5 text-g-text border-b border-g-border-weak last:border-b-0 align-middle;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-xs font-medium
+      bg-g-secondary text-g-text-secondary border-g-border-weak;
+  }
+  .chip-accent {
+    @apply inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-xs font-medium
+      bg-g-accent-main/15 text-g-accent-text border-g-accent-main/25;
+  }
+  .chip-green {
+    @apply inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-xs font-medium
+      bg-g-green-main/15 text-g-green-text border-g-green-main/25;
+  }
+  .chip-red {
+    @apply inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-xs font-medium
+      bg-g-red-main/15 text-g-red-text border-g-red-main/25;
+  }
+  .chip-yellow {
+    @apply inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-xs font-medium
+      bg-g-yellow-main/15 text-g-yellow-text border-g-yellow-main/25;
+  }
+}
+
+@layer utilities {
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .animate-fadeIn { animation: fadeIn 0.18s ease-out; }
+
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateX(8px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+  .animate-slideIn { animation: slideIn 0.2s ease-out; }
+
+  .scrollbar-none { -ms-overflow-style: none; scrollbar-width: none; }
+  .scrollbar-none::-webkit-scrollbar { display: none; }
+}
+
+/* Themed scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(36, 41, 46, 0.18) transparent;
+}
+.dark * {
+  scrollbar-color: rgba(204, 204, 220, 0.15) transparent;
+}
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: rgba(36, 41, 46, 0.18); border-radius: 3px; }
+*::-webkit-scrollbar-thumb:hover { background: rgba(36, 41, 46, 0.35); }
+.dark *::-webkit-scrollbar-thumb { background: rgba(204, 204, 220, 0.15); }
+.dark *::-webkit-scrollbar-thumb:hover { background: rgba(204, 204, 220, 0.30); }
+
+/* Markdown rendering used by install_instructions and release notes */
+.markdown { color: rgb(var(--g-text-primary)); font-size: 0.875rem; line-height: 1.65; }
+.markdown h1 { @apply text-2xl font-semibold mt-6 mb-3; }
+.markdown h2 { @apply text-xl font-semibold mt-6 mb-2; border-bottom: 1px solid var(--g-border-weak); padding-bottom: 0.25rem; }
+.markdown h3 { @apply text-lg font-semibold mt-4 mb-2; }
+.markdown p  { @apply my-3; }
+.markdown ul { @apply list-disc pl-6 my-3; }
+.markdown ol { @apply list-decimal pl-6 my-3; }
+.markdown li { @apply my-1; }
+.markdown a  { color: rgb(var(--g-text-link)); text-decoration: underline; }
+.markdown blockquote { border-left: 3px solid var(--g-border-medium); padding-left: 0.75rem; color: var(--g-text-secondary); margin: 0.75rem 0; }
+.markdown code { background: rgb(var(--g-secondary)); padding: 0.125rem 0.375rem; border-radius: 2px; font-size: 0.8125rem; }
+.markdown pre  {
+  background: rgb(17 18 23);
+  color: rgb(204 204 220);
+  padding: 0.875rem 1rem;
+  border-radius: 2px;
+  border: 1px solid var(--g-border-weak);
+  overflow-x: auto;
+  font-size: 0.8125rem;
+  margin: 0.75rem 0;
+}
+.markdown pre code { background: transparent; padding: 0; }
+.markdown table { width: 100%; border-collapse: collapse; margin: 0.75rem 0; }
+.markdown th, .markdown td { border: 1px solid var(--g-border-weak); padding: 0.375rem 0.5rem; font-size: 0.8125rem; }
+.markdown th { background: rgb(var(--g-secondary)); text-align: left; font-weight: 600; }

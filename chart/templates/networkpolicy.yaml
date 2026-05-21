@@ -1,0 +1,64 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "artifact-gateway.fullname" . }}
+  labels:
+    {{- include "artifact-gateway.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "artifact-gateway.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Same namespace.
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+        - protocol: TCP
+          port: {{ .Values.service.managementPort }}
+    # Ingress controller namespace (label your ingress ns with name=ingress-nginx
+    # or override this rule out-of-band).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+  egress:
+    # DNS.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Upstream registry (ghcr.io). Apply this broadly to 443/TCP rather than
+    # pinning an IP range — ghcr is fronted by a CDN with rotating IPs.
+    - ports:
+        - protocol: TCP
+          port: 443
+    # Postgres.
+    - ports:
+        - protocol: TCP
+          port: 5432
+    {{- if .Values.nats.url }}
+    # NATS (optional).
+    - ports:
+        - protocol: TCP
+          port: 4222
+    {{- end }}
+    {{- range .Values.networkPolicy.additionalEgress }}
+    - to:
+        - ipBlock:
+            cidr: {{ .cidr | quote }}
+      {{- with .ports }}
+      ports:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+{{- end }}

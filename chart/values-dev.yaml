@@ -1,0 +1,55 @@
+# Local dev overlay — kind/minikube friendly, no ingress, dev secrets.
+# Apply with: helm install artifact-gateway . -f values-dev.yaml
+#
+# This file intentionally hard-codes dev-only secret values so `helm template`
+# renders without --set flags. NEVER use these values in production.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/cnak-us/artifact-gateway
+  tag: "dev"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+  managementPort: 8090
+
+ingress:
+  enabled: false
+
+config:
+  externalHostname: "localhost:8080"
+  tokenTTLSeconds: 300
+  oidcAutoprovision: false
+  logLevel: "debug"
+  logFormat: "text"
+
+database:
+  url: "postgres://artifact_gateway:dev@artifact-gateway-postgres:5432/artifact_gateway?sslmode=disable"
+
+nats:
+  url: ""
+
+secrets:
+  create: true
+  # Dev-only fixed values; rotate or override in any non-dev environment.
+  kekBase64: "ZGV2LWtlay1iYXNlNjQtMzItYnl0ZXMtcGxhY2Vob2xkZXJYWA=="
+  sessionSigningKey: "dev0000000000000000000000000000000000000000000000000000000000000000"
+  jwtSigningKey: "dev1111111111111111111111111111111111111111111111111111111111111111"
+  serviceToken: "dev-service-token"
+
+bootstrapAdmin:
+  email: "admin@local.test"
+  password: "dev-admin-change-me"
+
+migrateJob:
+  enabled: true
+
+metrics:
+  serviceMonitor:
+    enabled: false
+
+networkPolicy:
+  enabled: false

@@ -1,0 +1,76 @@
+{{ include "artifact-gateway.fullname" . }} v{{ .Chart.AppVersion }} installed in namespace {{ .Release.Namespace }}.
+
+═══════════════════════════════════════════════════════════════════════
+  ⚠️  Cert/hostname constraint — read this first
+═══════════════════════════════════════════════════════════════════════
+
+  EXTERNAL_HOSTNAME = {{ .Values.config.externalHostname | default "(unset)" }}
+
+  OCI clients (docker / helm / oras) refuse to talk to the gateway unless
+  the hostname they connect to is in the TLS certificate's SAN list AND
+  matches `config.externalHostname` exactly.
+
+  Mismatch → opaque "x509: certificate is valid for X, not Y" errors with
+  no graceful fallback. If you see that, fix EXTERNAL_HOSTNAME or the cert.
+
+═══════════════════════════════════════════════════════════════════════
+  Reaching the service
+═══════════════════════════════════════════════════════════════════════
+
+{{- if .Values.ingress.enabled }}
+  Ingress is enabled. Reach the UI at:
+  {{- range .Values.ingress.hosts }}
+    https://{{ .host }}/admin
+  {{- end }}
+
+{{- else }}
+  Ingress is disabled. Port-forward for local access:
+
+    kubectl --namespace {{ .Release.Namespace }} port-forward \
+      svc/{{ include "artifact-gateway.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+
+  Then visit http://localhost:{{ .Values.service.port }}/admin
+{{- end }}
+
+═══════════════════════════════════════════════════════════════════════
+  Bootstrap admin
+═══════════════════════════════════════════════════════════════════════
+
+{{- if and .Values.bootstrapAdmin.email .Values.bootstrapAdmin.password }}
+  Login with:
+    email:    {{ .Values.bootstrapAdmin.email }}
+    password: (set in your values file — rotate after first login)
+
+  Retrieve the rendered password:
+    kubectl --namespace {{ .Release.Namespace }} get secret \
+      {{ include "artifact-gateway.envSecretName" . }} \
+      -o jsonpath='{.data.ADMIN_BOOTSTRAP_PASSWORD}' | base64 -d
+
+{{- else }}
+  No bootstrap admin was configured. First-login must be via OIDC, or
+  upgrade with `--set bootstrapAdmin.email=... --set bootstrapAdmin.password=...`
+{{- end }}
+
+═══════════════════════════════════════════════════════════════════════
+  Verify
+═══════════════════════════════════════════════════════════════════════
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward \
+    svc/{{ include "artifact-gateway.fullname" . }} {{ .Values.service.managementPort }}:{{ .Values.service.managementPort }} &
+  curl -fsS http://localhost:{{ .Values.service.managementPort }}/health/ready
+
+{{- if .Values.migrateJob.enabled }}
+
+  The pre-install migrate Job (`{{ include "artifact-gateway.fullname" . }}-migrate`)
+  ran goose migrations. Inspect with:
+    kubectl --namespace {{ .Release.Namespace }} logs job/{{ include "artifact-gateway.fullname" . }}-migrate
+
+  ─── Upgrading from v0.1.x → v0.2.x ───────────────────────────────────
+  v0.2 adds non-OCI download sources (GitHub Releases). The migrate Job
+  applies `00002_downloads.sql`, which:
+    • extends `packages` with `source` + release config columns
+    • widens the `packages.kind` / `upstream_credentials.kind` check constraints
+    • adds tables `release_assets_cache` and `download_signed_tokens`
+  The migration is additive and non-destructive — existing OCI packages
+  keep working unchanged. No new env vars are required.
+{{- end }}

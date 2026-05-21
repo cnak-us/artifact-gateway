@@ -1,0 +1,181 @@
+# artifact-gateway local development stack.
+#
+# Three services on a shared bridge network. The gateway reaches Postgres at
+# `postgres:5432` by DNS name. The `registry:2` service is a local OCI-registry
+# stand-in for tests that don't want to hit ghcr.io — exercise it via an
+# `oci-basic` upstream credential pointing at `http://registry:5000` (compose
+# net) or `http://localhost:${REGISTRY_HOST_PORT:-5050}` (host). ghcr.io is
+# pinned in the gateway and not configurable.
+#
+# Quick start:
+#   make dev-init          # one-time: generates .env with random secrets
+#   make dev               # brings up postgres + registry + Dex, then `go run .`
+#
+# Or run the full stack in containers (requires the image to exist):
+#   docker compose --profile build up -d --build
+#   docker compose up -d   # if you've already pulled/built the image
+
+services:
+  # ---------------------------------------------------------------------------
+  # Postgres — backing store for users, packages, licenses, tokens, audit.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: artifact-gateway-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: artifact_gateway
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d artifact_gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - artifact-gateway
+
+  # ---------------------------------------------------------------------------
+  # Registry — local OCI registry for tests/dev. Wire it in as an `oci-basic`
+  # upstream credential (BaseURL: http://registry:5000). The gateway will not
+  # treat this as ghcr — the `ghcr` Kind is pinned to https://ghcr.io.
+  # ---------------------------------------------------------------------------
+  registry:
+    image: registry:2
+    container_name: artifact-gateway-registry
+    restart: unless-stopped
+    ports:
+      # Host port 5050 because macOS AirPlay Receiver listens on 5000 by default.
+      # Override with REGISTRY_HOST_PORT in .env if you need a different host port.
+      - "${REGISTRY_HOST_PORT:-5050}:5000"
+    volumes:
+      - registry-data:/var/lib/registry
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    networks:
+      - artifact-gateway
+
+  # ---------------------------------------------------------------------------
+  # Dex — OIDC shim. Translates real OIDC (what the gateway speaks) down to
+  # whatever the upstream IdP supports (GitHub OAuth, SAML, LDAP, ...).
+  # Runs by default with `docker compose up -d` / `make dev`.
+  # GitHub connector requires GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET in .env;
+  # Dex will still serve OIDC discovery without it — the gateway auto-bootstraps
+  # its provider row using DEX_* env vars, so no admin-UI steps are needed.
+  # ---------------------------------------------------------------------------
+  dex:
+    image: dexidp/dex:v2.45.1
+    container_name: artifact-gateway-dex
+    restart: unless-stopped
+    ports:
+      - "5556:5556"
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes:
+      - ./config/dex.dev.yaml:/etc/dex/config.yaml:ro
+      - ./dex/web:/srv/dex/web:ro
+    environment:
+      # Connector credentials are forwarded from .env. Dex starts fine with
+      # any subset empty — the matching connector block in config/dex.dev.yaml
+      # just won't be usable until you fill the var. The built-in password DB
+      # (admin@cnak.us / admin) works regardless.
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GITLAB_CLIENT_ID: ${GITLAB_CLIENT_ID:-}
+      GITLAB_CLIENT_SECRET: ${GITLAB_CLIENT_SECRET:-}
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:5556/.well-known/openid-configuration"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - artifact-gateway
+
+  # ---------------------------------------------------------------------------
+  # artifact-gateway — the binary itself.
+  #
+  # Default: pulls a published image so `docker compose up` works without a
+  # local build. To build from source instead, run with `--profile build`:
+  #     docker compose --profile build up -d --build
+  # ---------------------------------------------------------------------------
+  artifact-gateway:
+    image: ghcr.io/cnak-us/artifact-gateway:dev
+    # Build from source by default — the published image won't exist until
+    # the release workflow runs. `docker compose up` will build automatically
+    # if the local image is missing. Use `docker compose build` to refresh.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    pull_policy: build
+    profiles:
+      - app
+      - build
+    container_name: artifact-gateway
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      registry:
+        condition: service_started
+      dex:
+        condition: service_healthy
+    ports:
+      - "8080:8080"   # public  — /v2/*, /admin/*, /catalog/*, /api/v1/*
+      - "8090:8090"   # mgmt    — /health/live, /health/ready, /metrics
+    env_file:
+      - .env
+    environment:
+      # Override so service-to-service DNS works inside the compose net.
+      # (Takes precedence over .env if duplicated.)
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/artifact_gateway?sslmode=disable
+      # Dex OIDC auto-bootstrap. The gateway creates a `dex` OIDC provider row
+      # on startup when all three DEX_* vars are present.
+      #
+      # ISSUER_URL is the browser-visible URL — it MUST match config/dex.dev.yaml's
+      # `issuer:` field AND the iss claim in id tokens. The browser hits Dex via
+      # the published host port (5556→5556).
+      #
+      # DISCOVERY_URL is the in-network DNS name. The gateway uses this URL to
+      # fetch OIDC metadata, JWKS, /token, and /userinfo — all server-side calls
+      # from inside the compose network. The provider package installs a custom
+      # http.Transport that rewrites outbound requests from issuer-host to
+      # discovery-host so /token POSTs go to dex:5556 (reachable) instead of
+      # localhost:5556 (not reachable from inside this container).
+      OIDC_DEFAULT_PROVIDER: dex
+      DEX_ISSUER_URL: http://localhost:5556
+      DEX_DISCOVERY_URL: http://dex:5556
+      DEX_CLIENT_ID: artifact-gateway
+      DEX_CLIENT_SECRET: dev-dex-client-secret
+    networks:
+      - artifact-gateway
+
+  # ---------------------------------------------------------------------------
+  # NATS — optional. Only spun up with `--profile nats`. Used for audit fanout
+  # and license-cache invalidation; the gateway runs fine without it.
+  # ---------------------------------------------------------------------------
+  nats:
+    image: nats:alpine
+    container_name: artifact-gateway-nats
+    profiles:
+      - nats
+    restart: unless-stopped
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["-js", "-m", "8222"]
+    networks:
+      - artifact-gateway
+
+networks:
+  artifact-gateway:
+    name: artifact-gateway
+    driver: bridge
+
+volumes:
+  postgres-data:
+  registry-data:

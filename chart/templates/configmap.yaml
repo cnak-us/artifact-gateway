@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "artifact-gateway.configMapName" . }}
+  labels:
+    {{- include "artifact-gateway.labels" . | nindent 4 }}
+data:
+  PUBLIC_PORT: {{ .Values.service.port | quote }}
+  MANAGEMENT_PORT: {{ .Values.service.managementPort | quote }}
+  EXTERNAL_HOSTNAME: {{ .Values.config.externalHostname | quote }}
+  UPSTREAM_GITHUB_API: {{ .Values.config.upstreamGitHubAPI | quote }}
+  TOKEN_TTL_SECONDS: {{ .Values.config.tokenTTLSeconds | quote }}
+  OIDC_AUTOPROVISION: {{ .Values.config.oidcAutoprovision | quote }}
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  LOG_FORMAT: {{ .Values.config.logFormat | quote }}
+  {{- if .Values.nats.url }}
+  NATS_URL: {{ .Values.nats.url | quote }}
+  {{- end }}
+  {{- if .Values.nats.credentialsSecret }}
+  NATS_CREDENTIALS_FILE: "/etc/nats-creds/user.creds"
+  {{- end }}
