@@ -21,7 +21,7 @@ ARG VERSION=dev
 # .dockerignore isn't being honored), we wipe it and reinstall fresh so the
 # container has Linux-native binaries.
 # -----------------------------------------------------------------------------
-FROM node:20-alpine AS ui-builder
+FROM node:26-alpine AS ui-builder
 
 WORKDIR /build/ui
 COPY ui/src/ ./src/
