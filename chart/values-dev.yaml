@@ -44,9 +44,6 @@ bootstrapAdmin:
   email: "admin@local.test"
   password: "dev-admin-change-me"
 
-migrateJob:
-  enabled: true
-
 metrics:
   serviceMonitor:
     enabled: false

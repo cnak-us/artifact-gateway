@@ -156,7 +156,7 @@ type LicenseContact struct {
 
 // RootKey is an Ed25519 signing key used to issue licenses. PrivateKeyEnc is
 // KEK-wrapped (auth.Crypto); a NULL/empty PrivateKeyEnc means the row is
-// verify-only (e.g. the legacy cnaklic pubkey imported by migration 00004).
+// verify-only (e.g. the legacy cnaklic pubkey seeded by schema.sql).
 // At most one row may have Active=true; that row signs newly-issued licenses.
 type RootKey struct {
 	ID            uuid.UUID

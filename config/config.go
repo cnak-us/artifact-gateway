@@ -67,9 +67,6 @@ type Config struct {
 
 	// Kubernetes downward
 	PodName string
-
-	// Migrate-only mode (runs goose then exits — used by the chart's pre-install Job)
-	MigrateOnly bool
 }
 
 func LoadFromEnv() *Config {
@@ -97,7 +94,6 @@ func LoadFromEnv() *Config {
 		LogLevel:               getEnv("LOG_LEVEL", "info"),
 		LogFormat:              getEnv("LOG_FORMAT", "json"),
 		PodName:                getEnv("POD_NAME", ""),
-		MigrateOnly:            getEnvBool("MIGRATE_ONLY", false),
 	}
 }
 

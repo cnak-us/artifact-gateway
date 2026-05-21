@@ -4,7 +4,7 @@ package store
 import (
 	"context"
 	"database/sql"
-	"embed"
+	_ "embed"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,12 +14,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
 )
 
-//go:embed migrations/*.sql
-var migrationsFS embed.FS
+//go:embed schema.sql
+var schemaSQL string
 
 // PG is the Postgres-backed DataStore.
 type PG struct {
@@ -50,25 +48,15 @@ func (p *PG) Close() {
 	}
 }
 
-// Pool exposes the underlying pgxpool. Useful for adapters (e.g. goose) that
-// need a database/sql handle via stdlib.OpenDBFromPool.
+// Pool exposes the underlying pgxpool.
 func (p *PG) Pool() *pgxpool.Pool { return p.pool }
 
-// SQLDB returns a *sql.DB backed by the same pool, suitable for goose.
-// The caller is responsible for closing the returned *sql.DB.
-func (p *PG) SQLDB() *sql.DB {
-	return stdlib.OpenDBFromPool(p.pool)
-}
-
-// RunMigrations applies all embedded goose migrations against db.
-// Pass the result of PG.SQLDB() (or any *sql.DB) — goose needs database/sql.
-func RunMigrations(ctx context.Context, db *sql.DB) error {
-	goose.SetBaseFS(migrationsFS)
-	if err := goose.SetDialect("postgres"); err != nil {
-		return fmt.Errorf("goose dialect: %w", err)
-	}
-	if err := goose.UpContext(ctx, db, "migrations"); err != nil {
-		return fmt.Errorf("goose up: %w", err)
+// EnsureSchema applies the embedded schema.sql against the database. The
+// statements are idempotent (IF NOT EXISTS, ON CONFLICT DO NOTHING) so this is
+// a no-op once the schema is in place.
+func (p *PG) EnsureSchema(ctx context.Context) error {
+	if _, err := p.pool.Exec(ctx, schemaSQL); err != nil {
+		return fmt.Errorf("apply schema: %w", err)
 	}
 	return nil
 }
@@ -1041,7 +1029,7 @@ func nsFrom(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: true}
 }
 
-// GetBranding reads the singleton row. The migration seeds id=1, but a missing
+// GetBranding reads the singleton row. schema.sql seeds id=1, but a missing
 // row is treated as "no overrides set" rather than an error — the UI falls
 // back to the compiled-in preset for every field.
 func (p *PG) GetBranding(ctx context.Context) (*Branding, error) {

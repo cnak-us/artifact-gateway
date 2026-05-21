@@ -33,10 +33,19 @@ DEV_CERT       := $(CERT_DIR)/dev.pem
 DEV_KEY        := $(CERT_DIR)/dev-key.pem
 DEV_CERT_HOSTS ?= localhost 127.0.0.1 ::1
 
+# Helm release coordinates. Override on the command line, e.g.
+#   make helm-upgrade HELM_VALUES="-f chart/values-do.yaml" HELM_ARGS="--set image.tag=v1.2.3"
+HELM_RELEASE   ?= artifact-gateway
+HELM_NAMESPACE ?= artifact-gateway
+HELM_CHART     ?= ./chart
+HELM_VALUES    ?= -f $(HELM_CHART)/values-dev.yaml
+HELM_ARGS      ?=
+
 .DEFAULT_GOAL  := help
 .PHONY: help dev-init dev dev-https dev-dex dev-certs dev-certs-clean dev-stop \
-        migrate build build-ui test lint image \
-        compose-up compose-down smoke clean
+        build build-ui test lint image \
+        compose-up compose-down smoke clean \
+        helm-install helm-upgrade helm-uninstall
 
 ## help: print available targets
 help:
@@ -163,10 +172,6 @@ dev-dex: dev ## [deprecated] start deps + Dex and run the gateway on HTTP
 dev-stop: ## stop docker compose services
 	docker compose down
 
-## migrate: run database migrations and exit
-migrate: ## run goose migrations and exit
-	set -a; . ./$(ENV_FILE); set +a; MIGRATE_ONLY=true go run .
-
 ## build: compile the Go binary to ./bin/artifact-gateway (requires `make build-ui` first for embed)
 build: ## compile Go binary to ./bin/artifact-gateway
 	mkdir -p $(BIN_DIR)
@@ -228,3 +233,19 @@ smoke: ## run end-to-end docker/helm/oras smoke pulls
 ## clean: remove build artifacts (bin/, ui/dist/, certs/)
 clean: ## remove bin/, ui/dist/, certs/
 	rm -rf $(BIN_DIR) $(UI_DIST) $(CERT_DIR)
+
+## helm-install: helm install the chart into HELM_NAMESPACE (fails if release exists)
+helm-install: ## helm install the chart (creates namespace)
+	helm install $(HELM_RELEASE) $(HELM_CHART) \
+		--namespace $(HELM_NAMESPACE) --create-namespace \
+		$(HELM_VALUES) $(HELM_ARGS)
+
+## helm-upgrade: helm upgrade --install the chart (idempotent install-or-upgrade)
+helm-upgrade: ## helm upgrade --install the chart
+	helm upgrade --install $(HELM_RELEASE) $(HELM_CHART) \
+		--namespace $(HELM_NAMESPACE) --create-namespace \
+		$(HELM_VALUES) $(HELM_ARGS)
+
+## helm-uninstall: helm uninstall the release (Postgres data + KEK are NOT removed)
+helm-uninstall: ## helm uninstall the release
+	helm uninstall $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)

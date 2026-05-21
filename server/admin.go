@@ -394,7 +394,7 @@ func issuerCloudFor(kind string) string {
 
 // validUpstreamCredKinds is the canonical allowlist of credential Kind
 // values. Keep in sync with the upstream_credentials_kind_check constraint
-// in store/migrations and with KIND_OPTS in the UI.
+// in store/schema.sql and with KIND_OPTS in the UI.
 var validUpstreamCredKinds = []string{
 	"ghcr", "github-api", "oci-basic",
 	"dockerhub", "quay", "gitlab",

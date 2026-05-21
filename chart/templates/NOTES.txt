@@ -58,19 +58,3 @@
   kubectl --namespace {{ .Release.Namespace }} port-forward \
     svc/{{ include "artifact-gateway.fullname" . }} {{ .Values.service.managementPort }}:{{ .Values.service.managementPort }} &
   curl -fsS http://localhost:{{ .Values.service.managementPort }}/health/ready
-
-{{- if .Values.migrateJob.enabled }}
-
-  The pre-install migrate Job (`{{ include "artifact-gateway.fullname" . }}-migrate`)
-  ran goose migrations. Inspect with:
-    kubectl --namespace {{ .Release.Namespace }} logs job/{{ include "artifact-gateway.fullname" . }}-migrate
-
-  ─── Upgrading from v0.1.x → v0.2.x ───────────────────────────────────
-  v0.2 adds non-OCI download sources (GitHub Releases). The migrate Job
-  applies `00002_downloads.sql`, which:
-    • extends `packages` with `source` + release config columns
-    • widens the `packages.kind` / `upstream_credentials.kind` check constraints
-    • adds tables `release_assets_cache` and `download_signed_tokens`
-  The migration is additive and non-destructive — existing OCI packages
-  keep working unchanged. No new env vars are required.
-{{- end }}

@@ -92,13 +92,37 @@ config:
   logLevel: "info"
   logFormat: "json"
 
-# Postgres. Provide exactly one of `url` (inline) or `existingSecret`.
-# `existingSecret` is the production path — the secret must contain a key
-# named `existingSecretKey` (default `url`) holding the DSN.
+# Postgres. Provide EXACTLY ONE of:
+#   - .Values.database.url               inline DSN (rendered into the env Secret)
+#   - .Values.database.existingSecret    BYO Secret + key holding the DSN
+#   - .Values.externalDatabase.enabled   structured config shared with Dex
+# When externalDatabase is enabled the chart also renders a Dex config Secret
+# that points Dex's storage at the same instance — see externalDatabase below.
 database:
   url: ""
   existingSecret: ""
   existingSecretKey: "url"
+
+# Shared external Postgres (e.g. DO Managed DB, RDS, Cloud SQL). When enabled,
+# the chart builds DATABASE_URL for the gateway AND renders a custom Dex config
+# Secret pointing Dex's storage at the same host. Each service gets its own
+# database name under `databases:` — pre-create them in the cluster.
+#
+#   psql -h <host> -p <port> -U <user> -d defaultdb \
+#     -c 'CREATE DATABASE artifact_gateway;' \
+#     -c 'CREATE DATABASE dex;'
+#
+# Mutually exclusive with .Values.database.url / .Values.database.existingSecret.
+externalDatabase:
+  enabled: false
+  host: ""
+  port: 5432
+  user: ""
+  password: ""
+  sslMode: "require"
+  databases:
+    app: "artifact_gateway"
+    dex: "dex"
 
 # NATS is optional. Empty url disables audit publish + license cache invalidation.
 nats:
@@ -107,22 +131,26 @@ nats:
   credentialsSecret: ""
 
 # Secret material.
-#   secrets.create=true  → chart renders a Secret from the inline values below.
+#   secrets.create=true        → chart renders a Secret. Empty fields below are
+#                                AUTO-GENERATED on first install and preserved
+#                                across upgrades via `lookup` of the existing
+#                                Secret. Provide explicit values only if you
+#                                already have material to import.
 #   secrets.existingSecret set → chart mounts that secret instead, fields ignored.
-# Inline values are intended for dev. Production should set existingSecret and
-# manage rotation out of band.
 secrets:
   create: true
   existingSecret: ""
   # 32 bytes, base64. AES-GCM KEK for stored ghcr PATs. Losing this bricks
-  # every encrypted column at rest. Generate with:
-  #   openssl rand -base64 32
+  # every encrypted column at rest. Auto-generated when empty (equivalent to
+  # `openssl rand -base64 32`).
   kekBase64: ""
-  # Hex, ≥ 32 bytes. HMAC-SHA256 for admin/catalog session cookies.
+  # Hex, 32 bytes (64 chars). HMAC-SHA256 for admin/catalog session cookies.
+  # Auto-generated when empty (equivalent to `openssl rand -hex 32`).
   sessionSigningKey: ""
-  # Hex, ≥ 32 bytes. HMAC-SHA256 for OCI bearer JWTs.
+  # Hex, 32 bytes (64 chars). HMAC-SHA256 for OCI bearer JWTs.
+  # Auto-generated when empty.
   jwtSigningKey: ""
-  # Shared secret for internal service callers.
+  # Shared secret for internal service callers. Auto-generated when empty.
   serviceToken: ""
   # NATS password-auth token (used only when nats.url is set without creds).
   natsAuthToken: ""
@@ -132,11 +160,6 @@ secrets:
 bootstrapAdmin:
   email: ""
   password: ""
-
-# Pre-install/pre-upgrade Hook Job that runs the same image with MIGRATE_ONLY=true.
-migrateJob:
-  enabled: true
-  backoffLimit: 3
 
 metrics:
   serviceMonitor:

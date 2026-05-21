@@ -88,8 +88,29 @@ Name of the env ConfigMap.
 {{- end }}
 
 {{/*
-Render an env block sourcing DATABASE_URL from .Values.database. Used in the
-migrate Job and Deployment so they read the DSN the same way.
+Name of the rendered Dex config Secret. Only used when externalDatabase.enabled
+and dex.enabled — we render config.yaml ourselves so Dex's storage block points
+at the same Postgres instance as the gateway.
+*/}}
+{{- define "artifact-gateway.dexConfigSecretName" -}}
+{{- printf "%s-dex-config" (include "artifact-gateway.fullname" .) -}}
+{{- end }}
+
+{{/*
+Build the Postgres DSN from .Values.externalDatabase. Used by databaseEnv and
+documented as the source of truth when externalDatabase is enabled.
+*/}}
+{{- define "artifact-gateway.externalDatabaseURL" -}}
+{{- $db := .Values.externalDatabase -}}
+{{- printf "postgresql://%s:%s@%s:%v/%s?sslmode=%s" $db.user $db.password $db.host (toString $db.port) $db.databases.app $db.sslMode -}}
+{{- end }}
+
+{{/*
+Render an env block sourcing DATABASE_URL for the gateway.
+Order of precedence:
+  1. .Values.database.existingSecret  (BYO Secret + key)
+  2. .Values.database.url             (rendered into envSecretName)
+  3. .Values.externalDatabase.enabled (built DSN, rendered into envSecretName)
 */}}
 {{- define "artifact-gateway.databaseEnv" -}}
 {{- if .Values.database.existingSecret -}}
@@ -98,7 +119,7 @@ migrate Job and Deployment so they read the DSN the same way.
     secretKeyRef:
       name: {{ .Values.database.existingSecret | quote }}
       key: {{ .Values.database.existingSecretKey | default "url" | quote }}
-{{- else if .Values.database.url -}}
+{{- else if or .Values.database.url .Values.externalDatabase.enabled -}}
 - name: DATABASE_URL
   valueFrom:
     secretKeyRef:
@@ -111,19 +132,21 @@ migrate Job and Deployment so they read the DSN the same way.
 Fail fast at render time if the chart is missing required inputs.
 */}}
 {{- define "artifact-gateway.validate" -}}
-{{- if and (not .Values.database.url) (not .Values.database.existingSecret) -}}
-{{- fail "artifact-gateway: one of .Values.database.url or .Values.database.existingSecret is required" -}}
+{{- $sources := list -}}
+{{- if .Values.database.url -}}{{- $sources = append $sources "database.url" -}}{{- end -}}
+{{- if .Values.database.existingSecret -}}{{- $sources = append $sources "database.existingSecret" -}}{{- end -}}
+{{- if .Values.externalDatabase.enabled -}}{{- $sources = append $sources "externalDatabase.enabled" -}}{{- end -}}
+{{- if eq (len $sources) 0 -}}
+{{- fail "artifact-gateway: set exactly one of .Values.database.url, .Values.database.existingSecret, or .Values.externalDatabase.enabled" -}}
 {{- end -}}
-{{- if and .Values.database.url .Values.database.existingSecret -}}
-{{- fail "artifact-gateway: set EITHER .Values.database.url OR .Values.database.existingSecret, not both" -}}
+{{- if gt (len $sources) 1 -}}
+{{- fail (printf "artifact-gateway: set EXACTLY ONE database source — got: %s" (join ", " $sources)) -}}
 {{- end -}}
-{{- if and .Values.secrets.create (not .Values.secrets.kekBase64) -}}
-{{- fail "artifact-gateway: .Values.secrets.kekBase64 is required when secrets.create=true. Generate with: openssl rand -base64 32" -}}
-{{- end -}}
-{{- if and .Values.secrets.create (not .Values.secrets.sessionSigningKey) -}}
-{{- fail "artifact-gateway: .Values.secrets.sessionSigningKey is required when secrets.create=true" -}}
-{{- end -}}
-{{- if and .Values.secrets.create (not .Values.secrets.jwtSigningKey) -}}
-{{- fail "artifact-gateway: .Values.secrets.jwtSigningKey is required when secrets.create=true" -}}
+{{- if .Values.externalDatabase.enabled -}}
+{{- if not .Values.externalDatabase.host -}}{{- fail "artifact-gateway: .Values.externalDatabase.host is required when externalDatabase.enabled" -}}{{- end -}}
+{{- if not .Values.externalDatabase.user -}}{{- fail "artifact-gateway: .Values.externalDatabase.user is required when externalDatabase.enabled" -}}{{- end -}}
+{{- if not .Values.externalDatabase.password -}}{{- fail "artifact-gateway: .Values.externalDatabase.password is required when externalDatabase.enabled" -}}{{- end -}}
+{{- if not .Values.externalDatabase.databases.app -}}{{- fail "artifact-gateway: .Values.externalDatabase.databases.app is required when externalDatabase.enabled" -}}{{- end -}}
+{{- if and .Values.dex.enabled (not .Values.externalDatabase.databases.dex) -}}{{- fail "artifact-gateway: .Values.externalDatabase.databases.dex is required when externalDatabase.enabled and dex.enabled" -}}{{- end -}}
 {{- end -}}
 {{- end -}}

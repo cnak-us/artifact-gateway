@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -37,13 +36,7 @@ import (
 var version = "dev"
 
 func main() {
-	migrateOnlyFlag := flag.Bool("migrate-only", false, "run goose migrations against DATABASE_URL and exit")
-	flag.Parse()
-
 	cfg := config.LoadFromEnv()
-	if *migrateOnlyFlag {
-		cfg.MigrateOnly = true
-	}
 
 	logger := newLogger(cfg)
 	slog.SetDefault(logger)
@@ -53,7 +46,6 @@ func main() {
 		"public_port", cfg.PublicPort,
 		"mgmt_port", cfg.ManagementPort,
 		"external_hostname", cfg.ExternalHostname,
-		"migrate_only", cfg.MigrateOnly,
 	)
 
 	if cfg.DatabaseURL == "" {
@@ -64,7 +56,7 @@ func main() {
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// ---- store + migrations ----
+	// ---- store ----
 	st, err := store.New(rootCtx, cfg.DatabaseURL)
 	if err != nil {
 		logger.Error("connect postgres", "err", err)
@@ -72,18 +64,9 @@ func main() {
 	}
 	defer st.Close()
 
-	sqlDB := st.SQLDB()
-	if err := store.RunMigrations(rootCtx, sqlDB); err != nil {
-		_ = sqlDB.Close()
-		logger.Error("run migrations", "err", err)
+	if err := st.EnsureSchema(rootCtx); err != nil {
+		logger.Error("ensure schema", "err", err)
 		os.Exit(1)
-	}
-	_ = sqlDB.Close()
-	logger.Info("migrations applied")
-
-	if cfg.MigrateOnly {
-		logger.Info("migrate-only requested, exiting")
-		return
 	}
 
 	// ---- secrets ----

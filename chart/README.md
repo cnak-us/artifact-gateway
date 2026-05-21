@@ -15,17 +15,17 @@ matrix, day-2 ops), read [`../DEPLOYMENT.md`](../DEPLOYMENT.md).
   `config.externalHostname`. **The cert SAN must exactly match the
   hostname customers type into `docker login`** — see the warning in
   `templates/ingress.yaml`. `cert-manager` is recommended.
-- A 32-byte KEK (`openssl rand -base64 32`) — **back this up out of
-  band, losing it bricks every encrypted column at rest.**
+
+The chart auto-generates the KEK and signing keys on first install and
+preserves them across upgrades via `lookup`. The env Secret is annotated
+`helm.sh/resource-policy: keep` so `helm uninstall` does NOT delete it
+(losing `KEK_BASE64` orphans every encrypted column at rest). Back the
+Secret up out of band anyway — the resource policy doesn't protect against
+namespace deletion or accidental `kubectl delete`.
 
 ## Install (production-shape)
 
 ```bash
-KEK=$(openssl rand -base64 32)
-SESSION=$(openssl rand -hex 32)
-JWT=$(openssl rand -hex 32)
-SVC=$(openssl rand -hex 16)
-
 helm install artifact-gateway . \
   --namespace artifact-gateway --create-namespace \
   --set ingress.enabled=true \
@@ -37,12 +37,24 @@ helm install artifact-gateway . \
   --set ingress.tls[0].hosts[0]=artifacts.example.com \
   --set config.externalHostname=artifacts.example.com \
   --set-string database.url='postgres://user:pass@postgres:5432/artifact_gateway?sslmode=require' \
-  --set-string secrets.kekBase64="$KEK" \
-  --set-string secrets.sessionSigningKey="$SESSION" \
-  --set-string secrets.jwtSigningKey="$JWT" \
-  --set-string secrets.serviceToken="$SVC" \
   --set bootstrapAdmin.email=admin@example.com \
   --set-string bootstrapAdmin.password='change-me-now'
+```
+
+Or use the structured `externalDatabase` block to share the Postgres
+connection with the bundled Dex IdP:
+
+```bash
+helm install artifact-gateway . \
+  --namespace artifact-gateway --create-namespace \
+  --set externalDatabase.enabled=true \
+  --set externalDatabase.host=postgres.example.com \
+  --set externalDatabase.user=cnak \
+  --set externalDatabase.password=$DB_PASSWORD \
+  --set dex.enabled=true \
+  --set dex.configSecret.create=false \
+  --set dex.configSecret.name=artifact-gateway-dex-config \
+  --set config.externalHostname=artifacts.example.com
 ```
 
 ## Install (local dev)
@@ -98,9 +110,8 @@ The secret must contain at minimum:
 helm upgrade artifact-gateway . -f values.yaml -f values-prod.yaml
 ```
 
-A `pre-install,pre-upgrade` Hook Job runs the migrations (image with
-`MIGRATE_ONLY=true`). If the migration fails, the upgrade aborts before
-the Deployment is touched.
+The gateway initialises its schema on startup, so no separate migration
+hook runs.
 
 ## Uninstall
 
@@ -108,8 +119,11 @@ the Deployment is touched.
 helm uninstall artifact-gateway --namespace artifact-gateway
 ```
 
-Postgres data is **not** removed — that lives in your DB. The KEK is
-gone unless you backed it up.
+Postgres data is **not** removed — that lives in your DB. The env Secret
+(KEK / signing keys / service token) is annotated
+`helm.sh/resource-policy: keep`, so `helm uninstall` keeps it. Reinstalling
+with the same release name will reuse those keys; if you delete the Secret
+manually, encrypted columns at rest become unreadable.
 
 ## Values reference
 

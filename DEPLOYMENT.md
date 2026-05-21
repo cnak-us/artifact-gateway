@@ -17,21 +17,19 @@ implementation plan at
 
 - **Kubernetes via Helm — primary.** Every production install. The
   chart at `chart/` is the single source of truth for the runtime
-  shape (env, ports, probes, secrets, migration hook).
+  shape (env, ports, probes, secrets).
 - **Docker Compose — local dev only.** Lives under
   `docker-compose.yml` and brings up Postgres + the gateway. Not for
-  production: it does not run the migrate-only job as a separate step
-  and does no TLS termination.
+  production: it does no TLS termination.
 - **Binary mode — out of scope.** Not built, not tested. Rationale
-  under "Surfaces we ship". If we ever do this, it would be a
-  `--migrate-only && start` wrapper script with the binary, an
-  external Postgres, and a reverse proxy in front for TLS.
+  under "Surfaces we ship". If we ever do this, it would be the
+  binary, an external Postgres, and a reverse proxy in front for TLS.
 
 ## Required infrastructure
 
 | Component            | Required?    | Notes |
 | -------------------- | ------------ | ----- |
-| **Postgres ≥ 14**    | **Required** | Single tenant DB. No bundled DB in the chart — bring your own (CloudNativePG, RDS, Cloud SQL, Bitnami subchart). `pgcrypto` and `citext` extensions are created by migrations. |
+| **Postgres ≥ 14**    | **Required** | Single tenant DB. No bundled DB in the chart — bring your own (CloudNativePG, RDS, Cloud SQL, Bitnami subchart). The gateway creates `pgcrypto` and `citext` extensions and the full schema on startup against a fresh database. |
 | **Ingress + TLS**    | **Required** | OCI clients (`docker`, `helm`, `oras`) refuse to talk to insecure registries on non-`localhost` hostnames. You need a real cert and a real ingress controller. |
 | **cert-manager**     | **Recommended** | Easiest TLS source; the cert SAN constraint below is fragile to get right by hand. |
 | **NATS**             | **Optional** | When configured, the gateway publishes audit events on `audit.{resource_type}.{action}` and listens for `cnak.internal.license.updated` to invalidate its license cache. Without NATS the gateway works, but license revocations take up to the cache TTL to propagate. |
@@ -55,7 +53,6 @@ Cross-referenced against `config/config.go`. Every var the binary reads.
 | `NATS_CREDENTIALS_FILE`   | (empty)                   | Mounted file path | no      | Path to a `.creds` file mounted from `nats.credentialsSecret` |
 | `NATS_AUTH_TOKEN`         | (empty)                   | Secret            | **yes** | Only used when NATS is password-authed |
 | `POD_NAME`                | (empty)                   | Downward API      | no      | For HA cache key disambiguation |
-| `MIGRATE_ONLY`            | `false`                   | Set on the Job    | no      | When true, runs `goose.Up` then exits 0 |
 | `DATABASE_URL`            | (empty)                   | Secret            | **yes** | `postgres://user:pass@host:5432/db?sslmode=require` |
 | `KEK_BASE64`              | (empty)                   | Secret            | **yes** | 32 random bytes, base64. **AES-GCM KEK for stored ghcr PATs.** Losing this bricks everything at rest. |
 | `SESSION_SIGNING_KEY`     | (empty)                   | Secret            | **yes** | Hex, ≥ 32 bytes. HMAC-SHA256 for admin/catalog cookies |
@@ -160,11 +157,9 @@ without the KEK is a brick.
 
 ### Upgrade
 
-The Helm chart runs migrations via a `pre-install,pre-upgrade` Hook
-Job that invokes the same image with `MIGRATE_ONLY=true`. The Job is
-re-created on every upgrade (`hook-delete-policy:
-before-hook-creation,hook-succeeded`) so a failed migration leaves the
-Job around for inspection.
+The gateway creates its schema on startup against an empty database
+(idempotent `CREATE TABLE IF NOT EXISTS` + `ON CONFLICT DO NOTHING`).
+There is no separate migration phase; upgrades are a normal Helm rollout.
 
 Standard upgrade flow:
 
@@ -172,25 +167,9 @@ Standard upgrade flow:
 helm upgrade artifact-gateway . -f values.yaml -f values-prod.yaml
 ```
 
-If the migrate Job fails, the upgrade aborts before the Deployment is
-touched — the old pods keep serving. Inspect with `kubectl logs
-job/<release>-artifact-gateway-migrate`.
-
-**v0.1.x → v0.2.x notes.** v0.2 introduces non-OCI download sources
-(GitHub Releases — see `DOWNLOADS.md`). Migration `00002_downloads.sql`
-extends the `packages` table with a `source` column + release config,
-widens the `packages.kind` / `upstream_credentials.kind` check
-constraints, and adds `release_assets_cache` and
-`download_signed_tokens` tables. The migration is additive and
-non-destructive — existing OCI packages and customer tokens keep
-working unchanged. The new `UPSTREAM_GITHUB_API` config var defaults
-to `https://api.github.com`; override it only for GHES.
-
-The chart remains single-replica by default. The new
-`download_signed_tokens` table is Postgres-backed, so it does not
-break multi-replica safety — but rate-limit accounting for the
-download flow is per-replica until a shared (e.g. NATS KV) counter
-lands, so do not enable HPA without that work.
+The chart remains single-replica by default. Rate-limit accounting
+for the download flow is per-replica until a shared (e.g. NATS KV)
+counter lands, so do not enable HPA without that work.
 
 ### Key rotation (playbook stub)
 

@@ -34,9 +34,7 @@ var _ = Describe("Postgres store", func() {
 		pg, err = store.New(ctx, dsn)
 		Expect(err).NotTo(HaveOccurred())
 
-		db := pg.SQLDB()
-		Expect(store.RunMigrations(ctx, db)).To(Succeed())
-		Expect(db.Close()).To(Succeed())
+		Expect(pg.EnsureSchema(ctx)).To(Succeed())
 	})
 
 	AfterEach(func() {

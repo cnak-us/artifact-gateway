@@ -38,7 +38,6 @@ make build       # compile ./bin/artifact-gateway
 make build-ui    # build the React UI into ui/dist (consumed by go:embed)
 make test        # go test ./...
 make lint        # go vet + golangci-lint (if installed)
-make migrate     # run goose migrations and exit
 make image       # docker build (context is parent dir; see below)
 make smoke       # end-to-end docker/helm/oras pull test (needs TID and SECRET)
 ```
@@ -87,7 +86,6 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `ADMIN_BOOTSTRAP_EMAIL`     | First admin account, created on first startup if no users exist                        |
 | `ADMIN_BOOTSTRAP_PASSWORD`  | First admin password — change it after first login                                     |
 | `NATS_URL`                  | Optional — leave blank to disable audit fanout and license-cache invalidation          |
-| `MIGRATE_ONLY`              | If `true`, run migrations and exit (used by the chart's pre-install Job)               |
 
 ### Upstream credentials
 
