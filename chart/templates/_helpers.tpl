@@ -129,6 +129,26 @@ Order of precedence:
 {{- end }}
 
 {{/*
+Static client entry the gateway uses to authenticate against bundled Dex.
+Looks up `dex.config.staticClients` for the entry whose `id` matches
+`.Values.dex.gatewayClientID` (default "artifact-gateway"). Output is YAML —
+callers should pipe through `fromYaml` to read fields. Fails render if
+`dex.enabled` but no matching entry exists, or the entry has no `secret`.
+This is what keeps the Dex static-client and the gateway's
+DEX_CLIENT_ID/DEX_CLIENT_SECRET in sync from one source.
+*/}}
+{{- define "artifact-gateway.dexGatewayClient" -}}
+{{- $wantID := default "artifact-gateway" .Values.dex.gatewayClientID -}}
+{{- $found := dict -}}
+{{- range $c := .Values.dex.config.staticClients -}}
+  {{- if eq $c.id $wantID -}}{{- $found = $c -}}{{- end -}}
+{{- end -}}
+{{- if not $found.id -}}{{- fail (printf "artifact-gateway: dex.enabled requires dex.config.staticClients to include an entry with id=%q (override via dex.gatewayClientID)" $wantID) -}}{{- end -}}
+{{- if not $found.secret -}}{{- fail (printf "artifact-gateway: dex.config.staticClients entry with id=%q has no `secret` set" $wantID) -}}{{- end -}}
+{{- toYaml $found -}}
+{{- end }}
+
+{{/*
 Fail fast at render time if the chart is missing required inputs.
 */}}
 {{- define "artifact-gateway.validate" -}}

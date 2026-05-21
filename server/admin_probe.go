@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -697,21 +698,47 @@ func probeOCITagList(r *http.Request, pkg *store.Package, cred *store.UpstreamCr
 		return probeResult{OK: false, Method: http.MethodGet, Summary: "no base URL resolved for credential"}
 	}
 	url := fmt.Sprintf("%s/v2/%s/tags/list?n=10", host, pkg.UpstreamRepo)
+	client := newProbeClientForCred(cred)
 	start := time.Now()
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
-	if err != nil {
-		return probeResult{OK: false, URL: url, Method: http.MethodGet, Summary: "request build failed: " + err.Error()}
-	}
-	basic := base64.StdEncoding.EncodeToString([]byte(cred.Username + ":" + pat))
-	req.Header.Set("Authorization", "Basic "+basic)
-	req.Header.Set("User-Agent", probeUserAgent)
 
-	resp, err := newProbeClientForCred(cred).Do(req)
+	resp, err := probeTagListGet(r.Context(), client, url, "Basic "+base64.StdEncoding.EncodeToString([]byte(cred.Username+":"+pat)))
 	if err != nil {
 		return probeResult{
 			OK: false, URL: url, Method: http.MethodGet, Status: 0,
 			DurationMS: time.Since(start).Milliseconds(),
 			Summary:    "network error: " + err.Error(),
+		}
+	}
+
+	// If the registry rejects Basic with a Bearer challenge (ghcr.io always
+	// does this for tags/list; Harbor/Gitea/oci-basic registries usually
+	// accept Basic and never get here), mint a scope-pinned token via the
+	// challenge's realm and retry. We force the scope to the actual repo —
+	// ghcr.io's challenge returns the placeholder "repository:user/image:pull"
+	// regardless of the request path, so trusting the challenge scope would
+	// mint a useless token.
+	if resp.StatusCode == http.StatusUnauthorized {
+		if ch := parseBearerChallenge(resp.Header.Get("Www-Authenticate")); ch != nil {
+			_ = resp.Body.Close()
+			ch.Scope = fmt.Sprintf("repository:%s:pull", pkg.UpstreamRepo)
+			bearer := &BearerExchangeAuthenticator{HTTPClient: client}
+			token, _, mintErr := bearer.mintToken(r.Context(), ch, cred, []byte(pat))
+			if mintErr != nil {
+				return probeResult{
+					OK: false, URL: url, Method: http.MethodGet,
+					Status: http.StatusUnauthorized, StatusText: "401 Unauthorized",
+					DurationMS: time.Since(start).Milliseconds(),
+					Summary:    "bearer exchange failed: " + mintErr.Error(),
+				}
+			}
+			resp, err = probeTagListGet(r.Context(), client, url, "Bearer "+token)
+			if err != nil {
+				return probeResult{
+					OK: false, URL: url, Method: http.MethodGet, Status: 0,
+					DurationMS: time.Since(start).Milliseconds(),
+					Summary:    "retry-with-bearer failed: " + err.Error(),
+				}
+			}
 		}
 	}
 	defer resp.Body.Close()
@@ -745,4 +772,16 @@ func probeOCITagList(r *http.Request, pkg *store.Package, cred *store.UpstreamCr
 		res.Summary = fmt.Sprintf("OCI tags/list returned %s", resp.Status)
 	}
 	return res
+}
+
+func probeTagListGet(ctx context.Context, client *http.Client, url, authHeader string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	req.Header.Set("User-Agent", probeUserAgent)
+	return client.Do(req)
 }

@@ -19,3 +19,15 @@ data:
   {{- if .Values.nats.credentialsSecret }}
   NATS_CREDENTIALS_FILE: "/etc/nats-creds/user.creds"
   {{- end }}
+  {{- /*
+    When bundled Dex is enabled, surface the issuer + client-id to the gateway
+    so bootstrapDexProvider (main.go) inserts the OIDC provider row on startup.
+    Without these the registry has no "dex" entry and /api/v1/auth/oidc/dex/start
+    returns 404 — i.e. dl.cnak.us never redirects to dex-dl.cnak.us.
+    DEX_CLIENT_SECRET lives in the env Secret alongside other crypto material.
+  */}}
+  {{- if .Values.dex.enabled }}
+  {{- $dexClient := include "artifact-gateway.dexGatewayClient" . | fromYaml }}
+  DEX_ISSUER_URL: {{ .Values.dex.config.issuer | quote }}
+  DEX_CLIENT_ID: {{ $dexClient.id | quote }}
+  {{- end }}

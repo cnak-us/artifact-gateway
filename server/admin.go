@@ -1122,7 +1122,7 @@ func createCustomerToken(d AdminDeps) http.HandlerFunc {
 		}
 		s := agoidc.SessionFrom(r.Context())
 		var createdBy *uuid.UUID
-		if s != nil {
+		if s != nil && s.UserID != uuid.Nil {
 			id := s.UserID
 			createdBy = &id
 		}

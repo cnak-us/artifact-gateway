@@ -38,7 +38,7 @@ DEV_CERT_HOSTS ?= localhost 127.0.0.1 ::1
 HELM_RELEASE   ?= artifact-gateway
 HELM_NAMESPACE ?= artifact-gateway
 HELM_CHART     ?= ./chart
-HELM_VALUES    ?= -f $(HELM_CHART)/values-dev.yaml
+HELM_VALUES    ?= -f $(HELM_CHART)/values-do.yaml
 HELM_ARGS      ?=
 
 .DEFAULT_GOAL  := help
