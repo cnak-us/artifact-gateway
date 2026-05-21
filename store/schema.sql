@@ -161,19 +161,6 @@ CREATE TABLE IF NOT EXISTS root_keys (
 
 CREATE UNIQUE INDEX IF NOT EXISTS root_keys_one_active_idx ON root_keys (active) WHERE active = TRUE;
 
--- Seed the legacy cnaklic public key as a verify-only root so previously-issued
--- .lic files continue to verify. Bytes mirror cnak/pkg/license/pubkey.go.
-INSERT INTO root_keys (name, public_key, private_key_enc, fingerprint, active, imported_from)
-VALUES (
-    'cnaklic-legacy',
-    decode('771c72e4f6ea354aa02047283cbd1510bd9c43aa2931fa5ccda23fd0e1fef0b3', 'hex'),
-    NULL,
-    substring(encode(digest(decode('771c72e4f6ea354aa02047283cbd1510bd9c43aa2931fa5ccda23fd0e1fef0b3', 'hex'), 'sha256'), 'hex'), 1, 16),
-    FALSE,
-    'cnaklic-legacy'
-)
-ON CONFLICT (name) DO NOTHING;
-
 CREATE TABLE IF NOT EXISTS license_contacts (
     license_id  UUID NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
     email       CITEXT NOT NULL,
