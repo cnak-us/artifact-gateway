@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -68,6 +69,8 @@ func MountCatalog(r chi.Router, d CatalogDeps) {
 		r.Get("/packages", handleCatalogListPackages(d))
 		r.Get("/packages/{slug}", handleCatalogGetPackage(d))
 		r.Get("/packages/{slug}/tags", handleCatalogListTags(d))
+		r.Get("/packages/{slug}/containers", handleCatalogListContainers(d))
+		r.Get("/packages/{slug}/containers/{alias}/tags", handleCatalogListContainerTags(d))
 	})
 }
 
@@ -365,6 +368,10 @@ func handleCatalogGetPackage(d CatalogDeps) http.HandlerFunc {
 // PAT — same code path as the OCI proxy but called from the catalog UI
 // (using the customer session cookie, not Bearer JWT) so the browser can
 // render the latest 10 tags inline on the package detail page.
+//
+// Multi-container packages (those with rows in package_containers) have no
+// single tag list to return; callers must hit /containers/{alias}/tags. This
+// handler 400s in that case so the SPA error message points at the right URL.
 func handleCatalogListTags(d CatalogDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		slug := slugParam(r)
@@ -384,62 +391,159 @@ func handleCatalogListTags(d CatalogDeps) http.HandlerFunc {
 			writeJSONErr(w, http.StatusForbidden, "not entitled to this package")
 			return
 		}
+		containers, _ := d.Store.ListContainersForPackage(r.Context(), pkg.ID)
+		if len(containers) > 0 {
+			writeJSONErr(w, http.StatusBadRequest,
+				"this package has multiple containers — call /containers/{alias}/tags")
+			return
+		}
+		serveUpstreamTagList(w, r, d, pkg.UpstreamCredentialID, pkg.UpstreamRepo)
+	}
+}
 
-		cred, err := d.Store.GetUpstreamCredential(r.Context(), pkg.UpstreamCredentialID)
-		if err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, "upstream credential missing")
-			return
-		}
-		pat, err := d.Crypto.Open(cred.PATEnc)
-		if err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, "upstream credential decrypt failed")
-			return
-		}
+type catalogContainerView struct {
+	Alias       string `json:"alias"`
+	DisplayName string `json:"display_name,omitempty"`
+}
 
-		host := effectiveHost(cred)
-		if host == "" {
-			writeJSONErr(w, http.StatusInternalServerError, "no upstream host resolved for credential")
-			return
-		}
-		upstreamURL := host + "/v2/" + pkg.UpstreamRepo + "/tags/list"
-
-		// Same Basic-then-bearer dance as the admin probe (admin_probe.go):
-		// ghcr.io rejects Basic on tags/list and returns a placeholder Bearer
-		// challenge whose scope we override with the actual repo scope before
-		// minting. Harbor/Gitea/oci-basic registries return 2xx on the first
-		// Basic call and never get to the retry.
-		basic := "Basic " + base64.StdEncoding.EncodeToString([]byte(cred.Username+":"+string(pat)))
-		resp, err := tagListGet(r.Context(), d.Upstream.Client, upstreamURL, basic)
+// handleCatalogListContainers returns the public (customer-facing) view of a
+// package's containers: alias + display name only. The upstream_repo is
+// deliberately omitted — it leaks internal registry layout.
+func handleCatalogListContainers(d CatalogDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		slug := slugParam(r)
+		id := catalogFromCtx(r.Context())
+		lic, _, err := d.resolveLicenseForSession(r.Context(), id)
 		if err != nil {
-			writeJSONErr(w, http.StatusBadGateway, "upstream error: "+err.Error())
+			writeJSONErr(w, http.StatusForbidden, err.Error())
 			return
 		}
-		if resp.StatusCode == http.StatusUnauthorized {
-			if ch := parseBearerChallenge(resp.Header.Get("Www-Authenticate")); ch != nil {
-				_ = resp.Body.Close()
-				ch.Scope = fmt.Sprintf("repository:%s:pull", pkg.UpstreamRepo)
-				bearer := &BearerExchangeAuthenticator{HTTPClient: d.Upstream.Client}
-				token, _, mintErr := bearer.mintToken(r.Context(), ch, cred, []byte(pat))
-				if mintErr != nil {
-					writeJSONErr(w, http.StatusBadGateway, "bearer exchange failed: "+mintErr.Error())
-					return
-				}
-				resp, err = tagListGet(r.Context(), d.Upstream.Client, upstreamURL, "Bearer "+token)
-				if err != nil {
-					writeJSONErr(w, http.StatusBadGateway, "retry-with-bearer failed: "+err.Error())
-					return
-				}
+		pkg, err := d.Store.GetPackageBySlug(r.Context(), slug)
+		if err != nil {
+			writeJSONErr(w, http.StatusNotFound, "package not found")
+			return
+		}
+		granted, err := d.Store.HasGrant(r.Context(), lic.ID, pkg.ID, "pull")
+		if err != nil || !granted {
+			writeJSONErr(w, http.StatusForbidden, "not entitled to this package")
+			return
+		}
+		rows, err := d.Store.ListContainersForPackage(r.Context(), pkg.ID)
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, "list containers: "+err.Error())
+			return
+		}
+		out := make([]catalogContainerView, 0, len(rows))
+		for _, c := range rows {
+			out = append(out, catalogContainerView{Alias: c.Alias, DisplayName: c.DisplayName})
+		}
+		writeJSON(w, http.StatusOK, out)
+	}
+}
+
+// handleCatalogListContainerTags returns tags for a single container under a
+// multi-container package. Reuses the same bearer-exchange + semver-sort
+// path as handleCatalogListTags.
+func handleCatalogListContainerTags(d CatalogDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		slug := slugParam(r)
+		alias := strings.TrimSpace(chi.URLParam(r, "alias"))
+		if alias == "" {
+			writeJSONErr(w, http.StatusBadRequest, "alias required")
+			return
+		}
+		id := catalogFromCtx(r.Context())
+		lic, _, err := d.resolveLicenseForSession(r.Context(), id)
+		if err != nil {
+			writeJSONErr(w, http.StatusForbidden, err.Error())
+			return
+		}
+		pkg, err := d.Store.GetPackageBySlug(r.Context(), slug)
+		if err != nil {
+			writeJSONErr(w, http.StatusNotFound, "package not found")
+			return
+		}
+		granted, err := d.Store.HasGrant(r.Context(), lic.ID, pkg.ID, "pull")
+		if err != nil || !granted {
+			writeJSONErr(w, http.StatusForbidden, "not entitled to this package")
+			return
+		}
+		container, err := d.Store.GetContainer(r.Context(), pkg.ID, alias)
+		if err != nil {
+			writeJSONErr(w, http.StatusNotFound, "container not found")
+			return
+		}
+		serveUpstreamTagList(w, r, d, pkg.UpstreamCredentialID, container.UpstreamRepo)
+	}
+}
+
+// serveUpstreamTagList runs the Basic-then-Bearer tag-list proxy for one
+// upstream repo, writing the JSON response (or error) to w.
+func serveUpstreamTagList(w http.ResponseWriter, r *http.Request, d CatalogDeps, credID uuid.UUID, upstreamRepo string) {
+	cred, err := d.Store.GetUpstreamCredential(r.Context(), credID)
+	if err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, "upstream credential missing")
+		return
+	}
+	pat, err := d.Crypto.Open(cred.PATEnc)
+	if err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, "upstream credential decrypt failed")
+		return
+	}
+
+	host := effectiveHost(cred)
+	if host == "" {
+		writeJSONErr(w, http.StatusInternalServerError, "no upstream host resolved for credential")
+		return
+	}
+	upstreamURL := host + "/v2/" + upstreamRepo + "/tags/list"
+
+	// Same Basic-then-bearer dance as the admin probe (admin_probe.go):
+	// ghcr.io rejects Basic on tags/list and returns a placeholder Bearer
+	// challenge whose scope we override with the actual repo scope before
+	// minting. Harbor/Gitea/oci-basic registries return 2xx on the first
+	// Basic call and never get to the retry.
+	basic := "Basic " + base64.StdEncoding.EncodeToString([]byte(cred.Username+":"+string(pat)))
+	resp, err := tagListGet(r.Context(), d.Upstream.Client, upstreamURL, basic)
+	if err != nil {
+		writeJSONErr(w, http.StatusBadGateway, "upstream error: "+err.Error())
+		return
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		if ch := parseBearerChallenge(resp.Header.Get("Www-Authenticate")); ch != nil {
+			_ = resp.Body.Close()
+			ch.Scope = fmt.Sprintf("repository:%s:pull", upstreamRepo)
+			bearer := &BearerExchangeAuthenticator{HTTPClient: d.Upstream.Client}
+			token, _, mintErr := bearer.mintToken(r.Context(), ch, cred, []byte(pat))
+			if mintErr != nil {
+				writeJSONErr(w, http.StatusBadGateway, "bearer exchange failed: "+mintErr.Error())
+				return
+			}
+			resp, err = tagListGet(r.Context(), d.Upstream.Client, upstreamURL, "Bearer "+token)
+			if err != nil {
+				writeJSONErr(w, http.StatusBadGateway, "retry-with-bearer failed: "+err.Error())
+				return
 			}
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode >= 400 {
-			body, _ := io.ReadAll(resp.Body)
-			writeJSONErr(w, resp.StatusCode, "upstream returned "+resp.Status+": "+string(body))
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.Copy(w, resp.Body)
 	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		writeJSONErr(w, resp.StatusCode, "upstream returned "+resp.Status+": "+string(body))
+		return
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var tl struct {
+		Name string   `json:"name"`
+		Tags []string `json:"tags"`
+	}
+	if err := json.Unmarshal(body, &tl); err == nil && len(tl.Tags) > 1 {
+		tl.Tags = sortTagsSemverDesc(tl.Tags)
+		writeJSON(w, http.StatusOK, tl)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
 }
 
 func tagListGet(ctx context.Context, client *http.Client, url, authHeader string) (*http.Response, error) {

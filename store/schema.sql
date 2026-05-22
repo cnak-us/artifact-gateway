@@ -91,6 +91,25 @@ CREATE INDEX IF NOT EXISTS packages_path_idx ON packages (path);
 ALTER TABLE packages
     ADD COLUMN IF NOT EXISTS managed_by TEXT NOT NULL DEFAULT '';
 
+-- package_containers holds the per-container rows under a multi-container
+-- package. Legacy single-container packages (which set packages.upstream_repo
+-- and have zero rows here) continue to work via the fallback "the package IS
+-- the container" semantic. The CHECK on alias blocks accidental nested paths
+-- because the customer-facing URL is dl.cnak.us/<package.path>/<alias>.
+CREATE TABLE IF NOT EXISTS package_containers (
+    package_id    UUID NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
+    alias         TEXT NOT NULL CHECK (alias <> '' AND alias !~ '/'),
+    upstream_repo TEXT NOT NULL,
+    display_name  TEXT NOT NULL DEFAULT '',
+    source        TEXT NOT NULL DEFAULT '',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (package_id, alias)
+);
+
+CREATE INDEX IF NOT EXISTS package_containers_pkg_idx ON package_containers (package_id);
+CREATE INDEX IF NOT EXISTS package_containers_source_idx ON package_containers (source);
+
 CREATE TABLE IF NOT EXISTS licenses (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     license_id    TEXT NOT NULL UNIQUE,

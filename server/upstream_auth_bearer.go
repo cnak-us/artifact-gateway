@@ -283,6 +283,7 @@ func init() {
 	RegisterAuthenticator("dockerhub", bearerAuthenticatorSingleton)
 	RegisterAuthenticator("quay", bearerAuthenticatorSingleton)
 	RegisterAuthenticator("gitlab", bearerAuthenticatorSingleton)
+	RegisterAuthenticator("ghcr", bearerAuthenticatorSingleton)
 }
 
 // Compile-time guard: BearerExchangeAuthenticator implements UpstreamAuthenticator.

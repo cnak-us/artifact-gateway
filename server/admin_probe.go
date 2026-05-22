@@ -608,6 +608,33 @@ func probePackage(d AdminDeps) http.HandlerFunc {
 			return
 		}
 
+		// Multi-container packages: probe each container and return a
+		// per-alias result map. Single-container packages fall through to
+		// the legacy single-probe path.
+		if pkg.Source == "oci" || pkg.Source == "" {
+			children, _ := d.Store.ListContainersForPackage(r.Context(), pkg.ID)
+			if len(children) > 0 {
+				out := make([]containerProbeResult, 0, len(children))
+				for i := range children {
+					c := &children[i]
+					res := probeOCITagListRepo(r, c.UpstreamRepo, cred, string(pat))
+					out = append(out, containerProbeResult{
+						Alias:       c.Alias,
+						DisplayName: c.DisplayName,
+						Result:      res,
+					})
+				}
+				_ = d.Store.TouchUpstreamCredential(r.Context(), cred.ID)
+				s := agoidc.SessionFrom(r.Context())
+				d.Auditor.LogResourceMutation(actorEmail(s), "probe", "package", pkg.ID.String(), pkg.Slug, clientIP(r))
+				writeJSON(w, http.StatusOK, map[string]any{
+					"multi_container": true,
+					"containers":      out,
+				})
+				return
+			}
+		}
+
 		var res probeResult
 		switch pkg.Source {
 		case "gitlab-release":
@@ -626,6 +653,13 @@ func probePackage(d AdminDeps) http.HandlerFunc {
 		d.Auditor.LogResourceMutation(actorEmail(s), "probe", "package", pkg.ID.String(), pkg.Slug, clientIP(r))
 		writeJSON(w, http.StatusOK, res)
 	}
+}
+
+// containerProbeResult is one row in the multi-container probe response.
+type containerProbeResult struct {
+	Alias       string      `json:"alias"`
+	DisplayName string      `json:"display_name,omitempty"`
+	Result      probeResult `json:"result"`
 }
 
 func probeGitHubReleases(r *http.Request, pkg *store.Package, pat string) probeResult {
@@ -682,11 +716,18 @@ func probeGitHubReleases(r *http.Request, pkg *store.Package, pat string) probeR
 }
 
 func probeOCITagList(r *http.Request, pkg *store.Package, cred *store.UpstreamCredential, pat string) probeResult {
+	return probeOCITagListRepo(r, pkg.UpstreamRepo, cred, pat)
+}
+
+// probeOCITagListRepo is the per-upstream-repo variant. probePackage uses it
+// to fan out across containers; the legacy probeOCITagList delegates to it
+// for single-container packages.
+func probeOCITagListRepo(r *http.Request, upstreamRepo string, cred *store.UpstreamCredential, pat string) probeResult {
 	host := effectiveHost(cred)
 	if host == "" {
 		return probeResult{OK: false, Method: http.MethodGet, Summary: "no base URL resolved for credential"}
 	}
-	url := fmt.Sprintf("%s/v2/%s/tags/list?n=100", host, pkg.UpstreamRepo)
+	url := fmt.Sprintf("%s/v2/%s/tags/list?n=100", host, upstreamRepo)
 	client := newProbeClientForCred(cred)
 	start := time.Now()
 
@@ -709,7 +750,7 @@ func probeOCITagList(r *http.Request, pkg *store.Package, cred *store.UpstreamCr
 	if resp.StatusCode == http.StatusUnauthorized {
 		if ch := parseBearerChallenge(resp.Header.Get("Www-Authenticate")); ch != nil {
 			_ = resp.Body.Close()
-			ch.Scope = fmt.Sprintf("repository:%s:pull", pkg.UpstreamRepo)
+			ch.Scope = fmt.Sprintf("repository:%s:pull", upstreamRepo)
 			bearer := &BearerExchangeAuthenticator{HTTPClient: client}
 			token, _, mintErr := bearer.mintToken(r.Context(), ch, cred, []byte(pat))
 			if mintErr != nil {
@@ -748,6 +789,7 @@ func probeOCITagList(r *http.Request, pkg *store.Package, cred *store.UpstreamCr
 
 	if res.OK && isJSON {
 		var tl struct {
+			Name string   `json:"name"`
 			Tags []string `json:"tags"`
 		}
 		_ = json.Unmarshal(body, &tl)
@@ -755,7 +797,11 @@ func probeOCITagList(r *http.Request, pkg *store.Package, cred *store.UpstreamCr
 		case 0:
 			res.Summary = "0 tags returned"
 		default:
-			res.Summary = fmt.Sprintf("%d tags returned. Newest tag: %s", len(tl.Tags), tl.Tags[len(tl.Tags)-1])
+			tl.Tags = sortTagsSemverDesc(tl.Tags)
+			res.Summary = fmt.Sprintf("%d tags returned. Newest tag: %s", len(tl.Tags), tl.Tags[0])
+			if reordered, err := json.Marshal(tl); err == nil {
+				res.Body = reordered
+			}
 		}
 	} else {
 		res.Summary = fmt.Sprintf("OCI tags/list returned %s", resp.Status)

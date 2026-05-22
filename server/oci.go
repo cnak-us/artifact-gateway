@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -87,8 +88,8 @@ func handleV2Root(d Deps) http.HandlerFunc {
 	}
 }
 
-// handleProxy resolves the package, checks the JWT's access grants for the
-// requested action, then hands off to Upstream.Proxy.
+// handleProxy resolves the package (and optional container), checks the JWT's
+// access grants for the requested action, then hands off to Upstream.Proxy.
 func handleProxy(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/v2/")
@@ -98,8 +99,8 @@ func handleProxy(d Deps) http.HandlerFunc {
 			return
 		}
 
-		pkg, err := d.Store.GetPackageByPath(r.Context(), name)
-		if err != nil {
+		pkg, container, ok := resolveContainerRequest(r.Context(), d.Store, name)
+		if !ok {
 			writeOCIError(w, http.StatusNotFound, "NAME_UNKNOWN", "repository name not known to registry")
 			return
 		}
@@ -111,8 +112,44 @@ func handleProxy(d Deps) http.HandlerFunc {
 			return
 		}
 
-		d.Upstream.Proxy(w, r, pkg, rest)
+		d.Upstream.Proxy(w, r, pkg, container, rest)
 	}
+}
+
+// resolveContainerRequest maps an OCI repo name to a package (+optional
+// container). Lookup rules:
+//
+//  1. Exact-match the full `name` against packages.path. If matched AND the
+//     package has no containers (legacy single-container or no children rows),
+//     return (pkg, nil, true). If matched but the package has container rows,
+//     deny — a multi-container package has no implicit root repo.
+//  2. Split `name` on the last '/'. If the prefix matches a package AND an
+//     alias row exists for the suffix, return (pkg, container, true).
+//  3. Otherwise → not found.
+func resolveContainerRequest(ctx context.Context, st store.DataStore, name string) (*store.Package, *store.PackageContainer, bool) {
+	if pkg, err := st.GetPackageByPath(ctx, name); err == nil {
+		// Multi-container packages have an empty packages.upstream_repo;
+		// hitting the bare path is invalid.
+		children, _ := st.ListContainersForPackage(ctx, pkg.ID)
+		if len(children) == 0 {
+			return pkg, nil, true
+		}
+		return nil, nil, false
+	}
+	slash := strings.LastIndex(name, "/")
+	if slash <= 0 || slash == len(name)-1 {
+		return nil, nil, false
+	}
+	prefix, alias := name[:slash], name[slash+1:]
+	pkg, err := st.GetPackageByPath(ctx, prefix)
+	if err != nil {
+		return nil, nil, false
+	}
+	container, err := st.GetContainer(ctx, pkg.ID, alias)
+	if err != nil {
+		return nil, nil, false
+	}
+	return pkg, container, true
 }
 
 // splitOCIPath parses `<name>/(manifests|blobs|tags)/<reference...>` from the

@@ -438,6 +438,217 @@ var _ = Describe("Reconcile", func() {
 	})
 })
 
+var _ = Describe("Reconcile containers", func() {
+	var (
+		ctx    context.Context
+		st     *fakeStore
+		crypto *auth.Crypto
+		verif  *fakeVerifier
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		st = newFakeStore()
+		crypto = newCrypto()
+		verif = &fakeVerifier{}
+	})
+
+	multiContainerManifest := func(containers ...apply.ContainerSpec) *apply.Manifest {
+		return &apply.Manifest{
+			APIVersion: apply.APIVersion, Kind: apply.Kind,
+			Spec: apply.ManifestSpec{
+				UpstreamCredentials: []apply.UpstreamCredentialSpec{
+					{Name: "ghcr", Kind: "ghcr", Username: "bot", PAT: "tok"},
+				},
+				Packages: []apply.PackageSpec{
+					{
+						Slug: "cnak-platform", Source: "oci",
+						Path:               "cnak-platform",
+						UpstreamCredential: "ghcr", Kind: "container",
+						DisplayName: "CNAK Platform",
+						Containers:  containers,
+					},
+				},
+			},
+		}
+	}
+
+	// Pull the row UUID for cnak-platform out of the fake store, so we can
+	// directly seed UI containers under the same package.
+	pkgRowID := func() uuid.UUID {
+		pkgs, _ := st.ListPackages(ctx)
+		for _, p := range pkgs {
+			if p.Slug == "cnak-platform" {
+				return p.ID
+			}
+		}
+		return uuid.Nil
+	}
+
+	It("inserts each declared container with source='manifest'", func() {
+		mf := multiContainerManifest(
+			apply.ContainerSpec{Alias: "backend", UpstreamRepo: "ns/backend"},
+			apply.ContainerSpec{Alias: "worker", UpstreamRepo: "ns/worker", DisplayName: "Worker"},
+		)
+		rep, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rep.Errors).To(BeEmpty())
+
+		actions := actionsByKey(rep)
+		Expect(actions["container/cnak-platform/backend"]).To(Equal("create"))
+		Expect(actions["container/cnak-platform/worker"]).To(Equal("create"))
+
+		got, err := st.ListContainersForPackage(ctx, pkgRowID())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(got).To(HaveLen(2))
+		for _, c := range got {
+			Expect(c.Source).To(Equal("manifest"))
+		}
+	})
+
+	It("is a noop on a second apply with the same containers", func() {
+		mf := multiContainerManifest(
+			apply.ContainerSpec{Alias: "backend", UpstreamRepo: "ns/backend"},
+			apply.ContainerSpec{Alias: "worker", UpstreamRepo: "ns/worker"},
+		)
+		_, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
+		Expect(err).ToNot(HaveOccurred())
+
+		rep, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rep.Errors).To(BeEmpty())
+		actions := actionsByKey(rep)
+		Expect(actions["container/cnak-platform/backend"]).To(Equal("noop"))
+		Expect(actions["container/cnak-platform/worker"]).To(Equal("noop"))
+	})
+
+	It("deletes a container removed from the manifest, leaving the other survivor", func() {
+		mf := multiContainerManifest(
+			apply.ContainerSpec{Alias: "backend", UpstreamRepo: "ns/backend"},
+			apply.ContainerSpec{Alias: "worker", UpstreamRepo: "ns/worker"},
+		)
+		_, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
+		Expect(err).ToNot(HaveOccurred())
+
+		mf.Spec.Packages[0].Containers = mf.Spec.Packages[0].Containers[:1]
+		rep, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(actionsByKey(rep)["container/cnak-platform/worker"]).To(Equal("delete"))
+
+		got, _ := st.ListContainersForPackage(ctx, pkgRowID())
+		aliases := []string{}
+		for _, c := range got {
+			aliases = append(aliases, c.Alias)
+		}
+		Expect(aliases).To(ConsistOf("backend"))
+	})
+
+	It("preserves a UI-created container (source='') across manifest reapply", func() {
+		// Seed the package row first by running an apply that creates it.
+		mf := multiContainerManifest(
+			apply.ContainerSpec{Alias: "backend", UpstreamRepo: "ns/backend"},
+		)
+		_, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
+		Expect(err).ToNot(HaveOccurred())
+
+		// Seed a UI container on the same package, directly.
+		Expect(st.UpsertContainer(ctx, &store.PackageContainer{
+			PackageID:    pkgRowID(),
+			Alias:        "ui-only",
+			UpstreamRepo: "ns/ui-only",
+			Source:       "",
+		})).To(Succeed())
+
+		// Reapply with one manifest container — UI row should survive.
+		_, err = apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
+		Expect(err).ToNot(HaveOccurred())
+
+		got, _ := st.ListContainersForPackage(ctx, pkgRowID())
+		aliases := []string{}
+		for _, c := range got {
+			aliases = append(aliases, c.Alias)
+		}
+		Expect(aliases).To(ConsistOf("backend", "ui-only"))
+	})
+
+	It("records ApplyError for invalid aliases but does not abort siblings", func() {
+		mf := multiContainerManifest(
+			apply.ContainerSpec{Alias: "", UpstreamRepo: "ns/empty"},
+			apply.ContainerSpec{Alias: "has/slash", UpstreamRepo: "ns/slash"},
+			apply.ContainerSpec{Alias: "has space", UpstreamRepo: "ns/space"},
+			apply.ContainerSpec{Alias: "good", UpstreamRepo: "ns/good"},
+		)
+		rep, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(len(rep.Errors)).To(BeNumerically(">=", 3))
+		Expect(actionsByKey(rep)["container/cnak-platform/good"]).To(Equal("create"))
+
+		got, _ := st.ListContainersForPackage(ctx, pkgRowID())
+		Expect(got).To(HaveLen(1))
+		Expect(got[0].Alias).To(Equal("good"))
+	})
+
+	It("reports an error for a duplicate alias within one package spec; first wins", func() {
+		mf := multiContainerManifest(
+			apply.ContainerSpec{Alias: "backend", UpstreamRepo: "ns/first"},
+			apply.ContainerSpec{Alias: "backend", UpstreamRepo: "ns/second"},
+		)
+		rep, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
+		Expect(err).ToNot(HaveOccurred())
+
+		var dupErr bool
+		for _, e := range rep.Errors {
+			if e.Kind == apply.KindContainer && strings.Contains(e.Message, "duplicate") {
+				dupErr = true
+			}
+		}
+		Expect(dupErr).To(BeTrue())
+
+		got, _ := st.ListContainersForPackage(ctx, pkgRowID())
+		Expect(got).To(HaveLen(1))
+		Expect(got[0].UpstreamRepo).To(Equal("ns/first"))
+	})
+
+	It("writes empty upstream_repo on the package row when containers are present", func() {
+		mf := multiContainerManifest(
+			apply.ContainerSpec{Alias: "backend", UpstreamRepo: "ns/backend"},
+		)
+		// Also set UpstreamRepo on the package spec; it should be ignored.
+		mf.Spec.Packages[0].UpstreamRepo = "ns/should-be-ignored"
+		_, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
+		Expect(err).ToNot(HaveOccurred())
+
+		pkgs, _ := st.ListPackages(ctx)
+		Expect(pkgs).To(HaveLen(1))
+		Expect(pkgs[0].UpstreamRepo).To(Equal(""))
+	})
+
+	It("still accepts legacy single-container packages (no containers, with upstreamRepo)", func() {
+		mf := &apply.Manifest{
+			APIVersion: apply.APIVersion, Kind: apply.Kind,
+			Spec: apply.ManifestSpec{
+				UpstreamCredentials: []apply.UpstreamCredentialSpec{
+					{Name: "ghcr", Kind: "ghcr", Username: "bot", PAT: "tok"},
+				},
+				Packages: []apply.PackageSpec{
+					{
+						Slug: "legacy", Source: "oci",
+						Path:               "legacy",
+						UpstreamRepo:       "ns/legacy",
+						UpstreamCredential: "ghcr", Kind: "container",
+					},
+				},
+			},
+		}
+		rep, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rep.Errors).To(BeEmpty())
+
+		pkgs, _ := st.ListPackages(ctx)
+		Expect(pkgs[0].UpstreamRepo).To(Equal("ns/legacy"))
+	})
+})
+
 func findLicense(ctx context.Context, st *fakeStore, licID string) *store.License {
 	all, _ := st.ListLicenses(ctx)
 	for i := range all {

@@ -74,8 +74,11 @@ func (u *Upstream) StartIssuerRefresh(ctx context.Context) {
 
 // Proxy rewrites and forwards a single OCI request.
 // gatewayPath is the package path as seen by the client (e.g. "cnak-us/cnak-core").
+// container is nil for legacy single-container packages; when non-nil, its
+// UpstreamRepo overrides pkg.UpstreamRepo. The upstream credential always
+// comes from the package row — one credential is shared across all containers.
 // rest is everything after that path — "/manifests/v1", "/blobs/sha256:...", "/tags/list".
-func (u *Upstream) Proxy(w http.ResponseWriter, r *http.Request, pkg *store.Package, rest string) {
+func (u *Upstream) Proxy(w http.ResponseWriter, r *http.Request, pkg *store.Package, container *store.PackageContainer, rest string) {
 	metrics.ProxyInFlight.Inc()
 	defer metrics.ProxyInFlight.Dec()
 
@@ -96,8 +99,12 @@ func (u *Upstream) Proxy(w http.ResponseWriter, r *http.Request, pkg *store.Pack
 		return
 	}
 
+	upstreamRepo := pkg.UpstreamRepo
+	if container != nil {
+		upstreamRepo = container.UpstreamRepo
+	}
 	host := effectiveHost(cred)
-	upstreamURL := host + "/v2/" + pkg.UpstreamRepo + rest
+	upstreamURL := host + "/v2/" + upstreamRepo + rest
 	method := r.Method
 	if method == "" {
 		method = http.MethodGet
@@ -200,7 +207,11 @@ func (u *Upstream) Proxy(w http.ResponseWriter, r *http.Request, pkg *store.Pack
 		if claims != nil {
 			subj = claims.Subject
 		}
-		u.Auditor.LogPackagePull(subj, pkg.Path, rest, clientIP(r))
+		auditPath := pkg.Path
+		if container != nil {
+			auditPath = pkg.Path + "/" + container.Alias
+		}
+		u.Auditor.LogPackagePull(subj, auditPath, rest, clientIP(r))
 	}
 }
 

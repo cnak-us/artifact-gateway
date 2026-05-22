@@ -187,6 +187,24 @@ func (*grantsFakeStore) FindLicensesByContactEmail(context.Context, string) ([]s
 	panic("unused")
 }
 
+// Package-container stubs — grants tests don't touch container CRUD.
+func (*grantsFakeStore) ListContainersForPackage(context.Context, uuid.UUID) ([]store.PackageContainer, error) {
+	panic("unused")
+}
+func (*grantsFakeStore) ListManifestContainersForPackage(context.Context, uuid.UUID) ([]store.PackageContainer, error) {
+	panic("unused")
+}
+func (*grantsFakeStore) GetContainer(context.Context, uuid.UUID, string) (*store.PackageContainer, error) {
+	panic("unused")
+}
+func (*grantsFakeStore) UpsertContainer(context.Context, *store.PackageContainer) error {
+	panic("unused")
+}
+func (*grantsFakeStore) DeleteContainer(context.Context, uuid.UUID, string) error { panic("unused") }
+func (*grantsFakeStore) ReplaceManifestContainersForPackage(context.Context, uuid.UUID, []store.PackageContainer) error {
+	panic("unused")
+}
+
 // Branding stubs — grants tests don't exercise the runtime branding surface.
 func (*grantsFakeStore) GetBranding(context.Context) (*store.Branding, error) { panic("unused") }
 func (*grantsFakeStore) SetBranding(context.Context, *store.Branding) error   { panic("unused") }

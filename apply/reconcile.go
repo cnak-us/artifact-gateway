@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/mail"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -14,11 +15,17 @@ import (
 	"github.com/google/uuid"
 )
 
+// containerAliasRe matches a valid container alias: one or more characters
+// from [A-Za-z0-9._-]. Aliases are single URL path segments — no '/' — and
+// the schema CHECK enforces the no-slash invariant on the DB side.
+var containerAliasRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
 // Kind constants used in ApplyItem.Kind. Mirrors the resource_type strings
 // used by the audit logger so dashboards stay consistent.
 const (
 	KindUpstreamCredential = "upstream-credential"
 	KindPackage            = "package"
+	KindContainer          = "container"
 	KindLicense            = "license"
 	KindGrant              = "grant"
 	KindContact            = "contact"
@@ -109,6 +116,7 @@ func Reconcile(
 	if err != nil {
 		return rep, err
 	}
+	reconcileContainers(ctx, st, mf.Spec.Packages, pkgState.slugToID, opts, rep)
 	licState, err := reconcileLicenses(ctx, st, verifier, mf.Spec.Licenses, opts, rep)
 	if err != nil {
 		return rep, err
@@ -357,10 +365,21 @@ func reconcilePackages(
 		}
 		switch source {
 		case "oci":
-			if s.Path == "" || s.UpstreamRepo == "" {
+			// Multi-container packages move the upstream repo to the per-
+			// container rows; the package itself only needs Path so the
+			// customer-facing URL prefix is set. Single-container packages
+			// keep the legacy "package IS the container" requirement.
+			if s.Path == "" {
 				rep.Errors = append(rep.Errors, ApplyError{
 					Kind: KindPackage, Name: s.Slug,
-					Message: "source=oci requires path and upstreamRepo",
+					Message: "source=oci requires path",
+				})
+				continue
+			}
+			if len(s.Containers) == 0 && s.UpstreamRepo == "" {
+				rep.Errors = append(rep.Errors, ApplyError{
+					Kind: KindPackage, Name: s.Slug,
+					Message: "source=oci requires upstreamRepo (or containers[])",
 				})
 				continue
 			}
@@ -396,8 +415,15 @@ func reconcilePackages(
 			continue
 		}
 
+		// When the spec declares containers, the package row's own
+		// upstream_repo is ignored — the per-container rows own the upstream
+		// repo. Write empty so the column doesn't lie about what's pulled.
+		upstreamRepo := s.UpstreamRepo
+		if len(s.Containers) > 0 {
+			upstreamRepo = ""
+		}
 		desired := store.Package{
-			Slug: s.Slug, Path: s.Path, UpstreamRepo: s.UpstreamRepo,
+			Slug: s.Slug, Path: s.Path, UpstreamRepo: upstreamRepo,
 			UpstreamCredentialID: credID, Kind: s.Kind,
 			DisplayName: s.DisplayName, Description: s.Description,
 			ReleaseNotesURL: s.ReleaseNotesURL, InstallInstructionsMD: s.InstallInstructionsMD,
@@ -970,6 +996,132 @@ func pruneContacts(
 		}
 		if err := st.ReplaceManifestContactsForLicense(ctx, lic.ID, nil); err != nil {
 			rep.Errors = append(rep.Errors, ApplyError{Kind: KindContact, Name: lic.LicenseID, Message: "prune: " + err.Error()})
+		}
+	}
+}
+
+// --- containers ------------------------------------------------------------
+
+// reconcileContainers applies each package spec's containers list. Per-alias
+// items are emitted (Create/Update/Noop/Delete) so the report is granular.
+// UI-owned rows (source='') on the same package are not surfaced and not
+// touched — ReplaceManifestContainersForPackage only swaps the manifest-owned
+// set. Packages whose spec has empty Containers leave the manifest-owned set
+// empty (any existing manifest rows are removed); UI rows are preserved.
+//
+// Note: there is no separate pruneContainers step. When a manifest-managed
+// package is dropped from the manifest entirely, prunePackages deletes the
+// package row and the package_containers rows cascade. When the package stays
+// but its containers list shrinks, the call below to
+// ReplaceManifestContainersForPackage handles it.
+func reconcileContainers(
+	ctx context.Context,
+	st store.DataStore,
+	pkgSpecs []PackageSpec,
+	pkgSlugToID map[string]uuid.UUID,
+	opts Options,
+	rep *ApplyReport,
+) {
+	for _, ps := range pkgSpecs {
+		if ps.Slug == "" {
+			continue // already reported by reconcilePackages
+		}
+		pkgRowID, ok := pkgSlugToID[ps.Slug]
+		if !ok {
+			continue // package itself failed to reconcile; skip silently
+		}
+
+		// Validate, normalize, dedupe within this package spec.
+		desired := make([]store.PackageContainer, 0, len(ps.Containers))
+		seenAlias := make(map[string]struct{}, len(ps.Containers))
+		for _, c := range ps.Containers {
+			alias := strings.TrimSpace(c.Alias)
+			if alias == "" {
+				rep.Errors = append(rep.Errors, ApplyError{
+					Kind: KindContainer, Name: ps.Slug, Message: "alias is required",
+				})
+				continue
+			}
+			if !containerAliasRe.MatchString(alias) {
+				rep.Errors = append(rep.Errors, ApplyError{
+					Kind: KindContainer, Name: ps.Slug + "/" + alias,
+					Message: "invalid alias: only [A-Za-z0-9._-] allowed, no '/'",
+				})
+				continue
+			}
+			if _, dup := seenAlias[alias]; dup {
+				rep.Errors = append(rep.Errors, ApplyError{
+					Kind: KindContainer, Name: ps.Slug + "/" + alias,
+					Message: "duplicate alias in package spec (first wins)",
+				})
+				continue
+			}
+			if strings.TrimSpace(c.UpstreamRepo) == "" {
+				rep.Errors = append(rep.Errors, ApplyError{
+					Kind: KindContainer, Name: ps.Slug + "/" + alias,
+					Message: "upstreamRepo is required",
+				})
+				continue
+			}
+			seenAlias[alias] = struct{}{}
+			desired = append(desired, store.PackageContainer{
+				PackageID:    pkgRowID,
+				Alias:        alias,
+				UpstreamRepo: strings.TrimSpace(c.UpstreamRepo),
+				DisplayName:  strings.TrimSpace(c.DisplayName),
+				Source:       sourceManifest,
+			})
+		}
+
+		current, err := st.ListManifestContainersForPackage(ctx, pkgRowID)
+		if err != nil {
+			rep.Errors = append(rep.Errors, ApplyError{
+				Kind: KindContainer, Name: ps.Slug, Message: err.Error(),
+			})
+			continue
+		}
+		currentByAlias := make(map[string]store.PackageContainer, len(current))
+		for _, c := range current {
+			currentByAlias[c.Alias] = c
+		}
+		desiredByAlias := make(map[string]store.PackageContainer, len(desired))
+		for _, c := range desired {
+			desiredByAlias[c.Alias] = c
+		}
+
+		for _, want := range desired {
+			itemName := ps.Slug + "/" + want.Alias
+			if prev, has := currentByAlias[want.Alias]; has {
+				var diff []string
+				if prev.UpstreamRepo != want.UpstreamRepo {
+					diff = append(diff, "upstream_repo")
+				}
+				if prev.DisplayName != want.DisplayName {
+					diff = append(diff, "display_name")
+				}
+				if len(diff) == 0 {
+					rep.Items = append(rep.Items, ApplyItem{Kind: KindContainer, Name: itemName, Action: ActionNoop})
+				} else {
+					rep.Items = append(rep.Items, ApplyItem{Kind: KindContainer, Name: itemName, Action: ActionUpdate, Diff: diff})
+				}
+			} else {
+				rep.Items = append(rep.Items, ApplyItem{Kind: KindContainer, Name: itemName, Action: ActionCreate})
+			}
+		}
+		for alias, prev := range currentByAlias {
+			if _, kept := desiredByAlias[alias]; kept {
+				continue
+			}
+			rep.Items = append(rep.Items, ApplyItem{Kind: KindContainer, Name: ps.Slug + "/" + prev.Alias, Action: ActionDelete})
+		}
+
+		if opts.DryRun {
+			continue
+		}
+		if err := st.ReplaceManifestContainersForPackage(ctx, pkgRowID, desired); err != nil {
+			rep.Errors = append(rep.Errors, ApplyError{
+				Kind: KindContainer, Name: ps.Slug, Message: err.Error(),
+			})
 		}
 	}
 }

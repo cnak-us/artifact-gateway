@@ -31,8 +31,16 @@ type fakeStore struct {
 	packagesByID    map[uuid.UUID]*store.Package
 	upstreamByID    map[uuid.UUID]*store.UpstreamCredential
 	grants          map[grantKey]bool
+	// containers keyed by (package-id, alias). Used by the OCI proxy and
+	// token-mint paths to resolve multi-container packages.
+	containers      map[containerKey]*store.PackageContainer
 	touchedTokens   []uuid.UUID
 	touchedUpstream []uuid.UUID
+}
+
+type containerKey struct {
+	Package uuid.UUID
+	Alias   string
 }
 
 type grantKey struct {
@@ -51,6 +59,7 @@ func newFakeStore() *fakeStore {
 		packagesByID:   map[uuid.UUID]*store.Package{},
 		upstreamByID:   map[uuid.UUID]*store.UpstreamCredential{},
 		grants:         map[grantKey]bool{},
+		containers:     map[containerKey]*store.PackageContainer{},
 	}
 }
 
@@ -222,6 +231,36 @@ func (*fakeStore) GetActiveSigningKey(context.Context) (*store.RootKey, error) {
 func (*fakeStore) InsertRootKey(context.Context, *store.RootKey) error         { panic("unused") }
 func (*fakeStore) SetActiveRootKey(context.Context, uuid.UUID) error           { panic("unused") }
 func (*fakeStore) DeleteRootKey(context.Context, uuid.UUID) error              { panic("unused") }
+
+// Package-container impls — multi-container routing tests exercise these.
+func (s *fakeStore) ListContainersForPackage(_ context.Context, pkgID uuid.UUID) ([]store.PackageContainer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]store.PackageContainer, 0)
+	for k, v := range s.containers {
+		if k.Package == pkgID {
+			out = append(out, *v)
+		}
+	}
+	return out, nil
+}
+func (*fakeStore) ListManifestContainersForPackage(context.Context, uuid.UUID) ([]store.PackageContainer, error) {
+	panic("unused")
+}
+func (s *fakeStore) GetContainer(_ context.Context, pkgID uuid.UUID, alias string) (*store.PackageContainer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.containers[containerKey{pkgID, alias}]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	return c, nil
+}
+func (*fakeStore) UpsertContainer(context.Context, *store.PackageContainer) error { panic("unused") }
+func (*fakeStore) DeleteContainer(context.Context, uuid.UUID, string) error       { panic("unused") }
+func (*fakeStore) ReplaceManifestContainersForPackage(context.Context, uuid.UUID, []store.PackageContainer) error {
+	panic("unused")
+}
 
 // License-contact stubs.
 func (*fakeStore) ListContactsForLicense(context.Context, uuid.UUID) ([]store.LicenseContact, error) {

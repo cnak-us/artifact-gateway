@@ -38,8 +38,8 @@ func TestBasicAuthenticatorOnUnauthorized(t *testing.T) {
 }
 
 func TestAuthenticatorForRegistry(t *testing.T) {
-	if _, ok := authenticatorFor("ghcr").(BasicAuthenticator); !ok {
-		t.Errorf("ghcr should resolve to BasicAuthenticator")
+	if _, ok := authenticatorFor("ghcr").(*BearerExchangeAuthenticator); !ok {
+		t.Errorf("ghcr should resolve to BearerExchangeAuthenticator (manifest fetches require token-exchange)")
 	}
 	if _, ok := authenticatorFor("oci-basic").(BasicAuthenticator); !ok {
 		t.Errorf("oci-basic should resolve to BasicAuthenticator")

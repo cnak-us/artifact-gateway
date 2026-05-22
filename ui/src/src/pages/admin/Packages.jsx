@@ -16,6 +16,11 @@ import Select from '../../components/Select.jsx';
 import Textarea from '../../components/Textarea.jsx';
 import ProbeResultModal from '../../components/ProbeResultModal.jsx';
 
+// Container alias rules — mirrored from the server-side validation. No
+// slashes, no spaces; just unreserved URL chars so the alias slot can live
+// in the pull path `dl.cnak.us/<path>/<alias>:<tag>` without escaping.
+const CONTAINER_ALIAS_RE = /^[A-Za-z0-9._-]+$/;
+
 function asArray(v, key) {
   if (Array.isArray(v)) return v;
   if (v && Array.isArray(v[key])) return v[key];
@@ -212,9 +217,18 @@ function credName(creds, id) {
 }
 
 function PackageModal({ open, onClose, initial, creds, onSaved }) {
+  const toast = useToast();
+  const confirm = useConfirm();
   const [form, setForm] = useState(initial || EMPTY);
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
+  // Containers state is only meaningful when editing an existing package
+  // (id present). For new packages we hide the containers section entirely
+  // until after the first save — that keeps the wire model simple (you can't
+  // POST /packages/:id/containers without an id).
+  const [containers, setContainers] = useState([]);
+  const [containersLoaded, setContainersLoaded] = useState(false);
+  const [upstreamMode, setUpstreamMode] = useState('single');
 
   useEffect(() => {
     if (!open) return;
@@ -222,7 +236,33 @@ function PackageModal({ open, onClose, initial, creds, onSaved }) {
     if (!base.source) base.source = 'oci';
     setForm(base);
     setErr(null);
+    setContainers([]);
+    setContainersLoaded(false);
+    // Default the mode: existing packages with container rows ⇒ multi.
+    // Re-fetched below; this is just the optimistic initial state.
+    setUpstreamMode('single');
+
+    if (base.id) {
+      admin.listPackageContainers(base.id)
+        .then((rows) => {
+          const list = Array.isArray(rows) ? rows : [];
+          setContainers(list);
+          setContainersLoaded(true);
+          if (list.length > 0) setUpstreamMode('multi');
+        })
+        .catch(() => { setContainersLoaded(true); });
+    } else {
+      setContainersLoaded(true);
+    }
   }, [initial, open]);
+
+  const reloadContainers = async () => {
+    if (!form.id) return;
+    try {
+      const rows = await admin.listPackageContainers(form.id);
+      setContainers(Array.isArray(rows) ? rows : []);
+    } catch (e) { toast.error(e.message); }
+  };
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
@@ -249,6 +289,9 @@ function PackageModal({ open, onClose, initial, creds, onSaved }) {
   const isGH = form.source === 'github-release';
   const isGL = form.source === 'gitlab-release';
   const isRelease = isGH || isGL;
+  // Multi-container only applies to OCI-source packages. Switching to a
+  // release source forces single-repo mode.
+  const isMulti = !isRelease && upstreamMode === 'multi';
   const releaseCredKind = SOURCE_TO_CRED_KIND[form.source];
   const repoRe = isGL ? GL_REPO_RE : GH_REPO_RE;
   const repoLabel = isGL ? 'GitLab project path *' : 'GitHub repo *';
@@ -281,6 +324,9 @@ function PackageModal({ open, onClose, initial, creds, onSaved }) {
     if (!form.slug || !form.path || !form.upstream_credential_id) return false;
     if (isRelease) {
       if (!form.github_repo || !repoRe.test(form.github_repo.trim())) return false;
+    } else if (isMulti) {
+      // Multi-container: upstream_repo on the package row isn't customer-
+      // facing — container rows carry the upstreams. Allow empty.
     } else {
       if (!form.upstream_repo) return false;
     }
@@ -306,6 +352,10 @@ function PackageModal({ open, onClose, initial, creds, onSaved }) {
         delete body.github_repo;
         delete body.release_pattern;
         delete body.asset_pattern;
+        // Multi-container packages keep upstream_repo as a hint at most. We
+        // send whatever the user has (possibly empty) — container rows are
+        // what actually serve traffic.
+        if (isMulti && !body.upstream_repo) body.upstream_repo = '';
       }
       if (form.id) {
         await admin.updatePackage(form.id, body);
@@ -388,12 +438,50 @@ function PackageModal({ open, onClose, initial, creds, onSaved }) {
             />
           </>
         ) : (
-          <Input
-            label="Upstream repo *"
-            value={form.upstream_repo}
-            onChange={set('upstream_repo')}
-            placeholder="ghcr.io/cnak-us/cnak-core"
-          />
+          <>
+            <div className="col-span-2">
+              <label className="block text-xs font-medium text-g-text-secondary mb-1.5">
+                Upstream layout
+              </label>
+              <div className="inline-flex rounded border border-g-border-medium overflow-hidden text-sm">
+                <button
+                  type="button"
+                  onClick={() => setUpstreamMode('single')}
+                  className={`px-3 py-1.5 ${
+                    upstreamMode === 'single'
+                      ? 'bg-g-accent-main text-white'
+                      : 'bg-g-secondary text-g-text-secondary hover:bg-g-hover'
+                  }`}
+                >
+                  Single repo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setUpstreamMode('multi')}
+                  className={`px-3 py-1.5 border-l border-g-border-medium ${
+                    upstreamMode === 'multi'
+                      ? 'bg-g-accent-main text-white'
+                      : 'bg-g-secondary text-g-text-secondary hover:bg-g-hover'
+                  }`}
+                >
+                  Multi-container
+                </button>
+              </div>
+              <p className="mt-1 text-xs text-g-text-disabled">
+                {isMulti
+                  ? 'Customers pull each container at dl.cnak.us/<path>/<alias>:<tag>.'
+                  : 'One upstream repo proxied at dl.cnak.us/<path>:<tag>.'}
+              </p>
+            </div>
+            {!isMulti && (
+              <Input
+                label="Upstream repo *"
+                value={form.upstream_repo}
+                onChange={set('upstream_repo')}
+                placeholder="ghcr.io/cnak-us/cnak-core"
+              />
+            )}
+          </>
         )}
 
         <Select
@@ -433,8 +521,204 @@ function PackageModal({ open, onClose, initial, creds, onSaved }) {
             onChange={set('install_instructions_md')}
           />
         </div>
+
+        {isMulti && (
+          <div className="col-span-2">
+            <ContainersSection
+              packageId={form.id}
+              loaded={containersLoaded}
+              rows={containers}
+              onChanged={reloadContainers}
+              onError={(e) => toast.error(e.message)}
+              confirm={confirm}
+            />
+          </div>
+        )}
       </div>
       <div className="mt-3"><ErrorBanner error={err} /></div>
     </Modal>
+  );
+}
+
+// ContainersSection — admin editor for the package_containers table. Only
+// rendered for OCI packages in multi-container mode. Each row maps an alias
+// to its upstream repo; tag rollups are the reconciler's job, not this UI.
+function ContainersSection({ packageId, loaded, rows, onChanged, onError, confirm }) {
+  // For new packages, force a save first so we have an id to POST against.
+  if (!packageId) {
+    return (
+      <div className="rounded border border-dashed border-g-border-weak px-3 py-3 text-sm text-g-text-secondary">
+        Save the package first, then add containers from the edit dialog.
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <label className="text-[11px] font-semibold uppercase tracking-wider text-g-text-secondary">
+          Containers
+        </label>
+        <span className="text-xs text-g-text-disabled">
+          {rows.length} container{rows.length === 1 ? '' : 's'}
+        </span>
+      </div>
+      <p className="text-xs text-g-text-secondary">
+        Each row publishes <code className="font-mono">{'<alias>'}</code> under this package's path.
+        Customers pull at <code className="font-mono">dl.cnak.us/&lt;path&gt;/&lt;alias&gt;:&lt;tag&gt;</code>.
+      </p>
+
+      {!loaded ? (
+        <Spinner label="Loading containers" />
+      ) : (
+        <>
+          {rows.length === 0 ? (
+            <div className="text-xs text-g-text-disabled italic px-3 py-2 border border-dashed border-g-border-weak rounded">
+              No containers yet. Add at least one below.
+            </div>
+          ) : (
+            <ul className="divide-y divide-g-border-weak rounded border border-g-border-weak">
+              {rows.map((r) => (
+                <ContainerRow
+                  key={r.alias}
+                  row={r}
+                  onDelete={async () => {
+                    const ok = await confirm({
+                      title: 'Remove container?',
+                      message: `Alias "${r.alias}" will be removed from this package. Customers pulling dl.cnak.us/<path>/${r.alias}:<tag> will start receiving 404.`,
+                      confirmLabel: 'Remove container',
+                      danger: true,
+                    });
+                    if (!ok) return;
+                    try {
+                      await admin.deletePackageContainer(packageId, r.alias);
+                      onChanged();
+                    } catch (e) { onError(e); }
+                  }}
+                />
+              ))}
+            </ul>
+          )}
+
+          <AddContainerForm
+            existingAliases={new Set(rows.map((r) => r.alias))}
+            onAdd={async ({ alias, upstreamRepo, displayName }) => {
+              try {
+                await admin.upsertPackageContainer(packageId, {
+                  alias, upstreamRepo, displayName,
+                });
+                onChanged();
+                return true;
+              } catch (e) { onError(e); return false; }
+            }}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+function ContainerRow({ row, onDelete }) {
+  return (
+    <li className="px-3 py-2 grid grid-cols-12 gap-2 items-center">
+      <div className="col-span-3 min-w-0">
+        <div className="font-mono text-sm truncate text-g-text">{row.alias}</div>
+        {row.display_name && (
+          <div className="text-xs text-g-text-secondary truncate">{row.display_name}</div>
+        )}
+      </div>
+      <div className="col-span-7 min-w-0">
+        <div className="font-mono text-xs text-g-text-secondary truncate" title={row.upstream_repo}>
+          {row.upstream_repo || '—'}
+        </div>
+        {row.source && (
+          <div className="mt-0.5">
+            <Badge color="gray">{row.source}</Badge>
+          </div>
+        )}
+      </div>
+      <div className="col-span-2 flex justify-end">
+        <IconButton
+          icon={<MdDelete />}
+          label="Remove container"
+          variant="danger"
+          onClick={onDelete}
+        />
+      </div>
+    </li>
+  );
+}
+
+function AddContainerForm({ existingAliases, onAdd }) {
+  const [alias, setAlias] = useState('');
+  const [upstreamRepo, setUpstreamRepo] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const trimmedAlias = alias.trim();
+  const aliasFormatErr = trimmedAlias && !CONTAINER_ALIAS_RE.test(trimmedAlias)
+    ? 'Letters, digits, dot, underscore, hyphen only'
+    : null;
+  const aliasDupErr = trimmedAlias && existingAliases.has(trimmedAlias)
+    ? 'Alias already exists'
+    : null;
+  const aliasErr = aliasFormatErr || aliasDupErr;
+  const canAdd = !!trimmedAlias && !aliasErr && !!upstreamRepo.trim();
+
+  const submit = async () => {
+    if (!canAdd || busy) return;
+    setBusy(true);
+    const ok = await onAdd({
+      alias: trimmedAlias,
+      upstreamRepo: upstreamRepo.trim(),
+      displayName: displayName.trim(),
+    });
+    setBusy(false);
+    if (ok) { setAlias(''); setUpstreamRepo(''); setDisplayName(''); }
+  };
+
+  return (
+    <div className="rounded border border-g-border-weak p-3 bg-g-secondary/40">
+      <div className="text-[11px] font-semibold uppercase tracking-wider text-g-text-secondary mb-2">
+        Add container
+      </div>
+      <div className="grid grid-cols-12 gap-2 items-start">
+        <div className="col-span-3">
+          <Input
+            value={alias}
+            onChange={(e) => setAlias(e.target.value)}
+            placeholder="alias (e.g. api)"
+            aria-label="Alias"
+            error={aliasErr || undefined}
+          />
+        </div>
+        <div className="col-span-5">
+          <Input
+            value={upstreamRepo}
+            onChange={(e) => setUpstreamRepo(e.target.value)}
+            placeholder="ghcr.io/acme/api"
+            aria-label="Upstream repo"
+          />
+        </div>
+        <div className="col-span-2">
+          <Input
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            placeholder="display name"
+            aria-label="Display name"
+          />
+        </div>
+        <div className="col-span-2 flex justify-end pt-0.5">
+          <Button
+            variant="primary"
+            onClick={submit}
+            disabled={!canAdd}
+            loading={busy}
+          >
+            Add
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }

@@ -141,10 +141,11 @@ func (h *TokenHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if s.resourceType != "repository" || len(s.actions) == 0 {
 			continue
 		}
-		pkg, err := h.Store.GetPackageByPath(ctx, s.name)
-		if err != nil {
-			// Unknown package: drop scope silently — matches Docker spec, the
-			// client will retry-or-fail with a 401 from the OCI handler.
+		pkg, ok := resolvePackageForScope(ctx, h.Store, s.name)
+		if !ok {
+			// Unknown package or unknown container: drop scope silently —
+			// matches Docker spec, the client will retry-or-fail with a 401
+			// from the OCI handler.
 			continue
 		}
 		allowed := make([]string, 0, len(s.actions))
@@ -210,6 +211,31 @@ func (h *TokenHandler) cachedLicense(id, blob string) (*cnaklicense.License, boo
 		h.Cache.Put(id, l)
 	}
 	return l, true
+}
+
+// resolvePackageForScope maps a docker scope name (e.g. "cnak-platform" or
+// "cnak-platform/backend") to its owning package. Single-container scopes
+// match packages.path verbatim; multi-container scopes split on the last
+// '/' and require both a package at the prefix and a container row at the
+// suffix. Grants are always per-package, so the container only gates which
+// repos exist — not which actions are allowed.
+func resolvePackageForScope(ctx context.Context, st store.DataStore, name string) (*store.Package, bool) {
+	if pkg, err := st.GetPackageByPath(ctx, name); err == nil {
+		return pkg, true
+	}
+	slash := strings.LastIndex(name, "/")
+	if slash <= 0 || slash == len(name)-1 {
+		return nil, false
+	}
+	prefix, alias := name[:slash], name[slash+1:]
+	pkg, err := st.GetPackageByPath(ctx, prefix)
+	if err != nil {
+		return nil, false
+	}
+	if _, err := st.GetContainer(ctx, pkg.ID, alias); err != nil {
+		return nil, false
+	}
+	return pkg, true
 }
 
 // parseScopes turns repeated `scope=repository:<name>:pull,push` query values

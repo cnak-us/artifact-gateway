@@ -62,20 +62,37 @@ type UpstreamCredentialSpec struct {
 // PackageSpec declares a catalog entry. UpstreamCredential references
 // UpstreamCredentialSpec.Name; the reconciler resolves it to the credential's
 // UUID at apply time.
+//
+// Multi-container packages set Containers (one per container alias). When
+// Containers is non-empty, UpstreamRepo on the package itself is ignored
+// (the reconciler writes an empty string) and the per-container UpstreamRepo
+// values take over. All containers under a package share the package's
+// UpstreamCredential.
 type PackageSpec struct {
-	Slug                  string `yaml:"slug"                              json:"slug"`
-	Source                string `yaml:"source,omitempty"                  json:"source,omitempty"` // oci | github-release; defaults to "oci"
-	Path                  string `yaml:"path,omitempty"                    json:"path,omitempty"`
-	UpstreamRepo          string `yaml:"upstreamRepo,omitempty"            json:"upstreamRepo,omitempty"`
-	GitHubRepo            string `yaml:"githubRepo,omitempty"              json:"githubRepo,omitempty"`
-	ReleasePattern        string `yaml:"releasePattern,omitempty"          json:"releasePattern,omitempty"`
-	AssetPattern          string `yaml:"assetPattern,omitempty"            json:"assetPattern,omitempty"`
-	UpstreamCredential    string `yaml:"upstreamCredential"                json:"upstreamCredential"`
-	Kind                  string `yaml:"kind"                              json:"kind"` // container | helm | binary
-	DisplayName           string `yaml:"displayName,omitempty"             json:"displayName,omitempty"`
-	Description           string `yaml:"description,omitempty"             json:"description,omitempty"`
-	ReleaseNotesURL       string `yaml:"releaseNotesUrl,omitempty"         json:"releaseNotesUrl,omitempty"`
-	InstallInstructionsMD string `yaml:"installInstructionsMD,omitempty"   json:"installInstructionsMD,omitempty"`
+	Slug                  string          `yaml:"slug"                              json:"slug"`
+	Source                string          `yaml:"source,omitempty"                  json:"source,omitempty"` // oci | github-release; defaults to "oci"
+	Path                  string          `yaml:"path,omitempty"                    json:"path,omitempty"`
+	UpstreamRepo          string          `yaml:"upstreamRepo,omitempty"            json:"upstreamRepo,omitempty"` // legacy single-container; ignored when Containers is non-empty
+	Containers            []ContainerSpec `yaml:"containers,omitempty"              json:"containers,omitempty"`   // multi-container; takes precedence over UpstreamRepo
+	GitHubRepo            string          `yaml:"githubRepo,omitempty"              json:"githubRepo,omitempty"`
+	ReleasePattern        string          `yaml:"releasePattern,omitempty"          json:"releasePattern,omitempty"`
+	AssetPattern          string          `yaml:"assetPattern,omitempty"            json:"assetPattern,omitempty"`
+	UpstreamCredential    string          `yaml:"upstreamCredential"                json:"upstreamCredential"`
+	Kind                  string          `yaml:"kind"                              json:"kind"` // container | helm | binary
+	DisplayName           string          `yaml:"displayName,omitempty"             json:"displayName,omitempty"`
+	Description           string          `yaml:"description,omitempty"             json:"description,omitempty"`
+	ReleaseNotesURL       string          `yaml:"releaseNotesUrl,omitempty"         json:"releaseNotesUrl,omitempty"`
+	InstallInstructionsMD string          `yaml:"installInstructionsMD,omitempty"   json:"installInstructionsMD,omitempty"`
+}
+
+// ContainerSpec declares one container under a multi-container package. Alias
+// is a single path segment (no '/') used as the customer-facing URL suffix:
+// dl.cnak.us/<package.path>/<alias>. UpstreamRepo names the upstream OCI repo
+// the proxy pulls from; the credential is inherited from the parent package.
+type ContainerSpec struct {
+	Alias        string `yaml:"alias"                  json:"alias"`
+	UpstreamRepo string `yaml:"upstreamRepo"           json:"upstreamRepo"`
+	DisplayName  string `yaml:"displayName,omitempty"  json:"displayName,omitempty"`
 }
 
 // LicenseSpec is a raw .lic blob plus optional manifest-managed metadata such

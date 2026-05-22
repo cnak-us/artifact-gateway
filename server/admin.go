@@ -84,6 +84,9 @@ func MountAdmin(r chi.Router, d AdminDeps) {
 				r.Patch("/{id}", patchPackage(d))
 				r.Post("/{id}/probe", probePackage(d))
 				r.Delete("/{id}", deletePackage(d))
+				r.Get("/{id}/containers", listPackageContainers(d))
+				r.Post("/{id}/containers", upsertPackageContainer(d))
+				r.Delete("/{id}/containers/{alias}", deletePackageContainer(d))
 			})
 
 			r.Route("/licenses", func(r chi.Router) {
@@ -1043,6 +1046,136 @@ func removeContact(d AdminDeps) http.HandlerFunc {
 		}
 		s := agoidc.SessionFrom(r.Context())
 		d.Auditor.LogResourceMutation(actorEmail(s), "remove_contact", "license-contact", id.String(), email, clientIP(r))
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// --- package containers ----------------------------------------------------
+
+// containerAliasAdminRe matches the same alias shape the reconciler enforces:
+// [A-Za-z0-9._-]+, no '/'. The DB CHECK enforces the no-slash invariant on
+// the schema side; this regex is the friendlier rejection at the API edge.
+var containerAliasAdminRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+type containerDTO struct {
+	PackageID    uuid.UUID `json:"package_id"`
+	Alias        string    `json:"alias"`
+	UpstreamRepo string    `json:"upstream_repo"`
+	DisplayName  string    `json:"display_name,omitempty"`
+	Source       string    `json:"source,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+func containerToDTO(c *store.PackageContainer) containerDTO {
+	return containerDTO{
+		PackageID:    c.PackageID,
+		Alias:        c.Alias,
+		UpstreamRepo: c.UpstreamRepo,
+		DisplayName:  c.DisplayName,
+		Source:       c.Source,
+		CreatedAt:    c.CreatedAt,
+		UpdatedAt:    c.UpdatedAt,
+	}
+}
+
+type upsertContainerIn struct {
+	Alias        string `json:"alias"`
+	UpstreamRepo string `json:"upstream_repo"`
+	DisplayName  string `json:"display_name"`
+}
+
+func listPackageContainers(d AdminDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(chi.URLParam(r, "id"))
+		if err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "invalid id")
+			return
+		}
+		rows, err := d.Store.ListContainersForPackage(r.Context(), id)
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out := make([]containerDTO, 0, len(rows))
+		for i := range rows {
+			out = append(out, containerToDTO(&rows[i]))
+		}
+		writeJSON(w, http.StatusOK, out)
+	}
+}
+
+// upsertPackageContainer creates or updates a container. Rows written here
+// are tagged source='' (UI-owned) so a later manifest apply won't strip them.
+func upsertPackageContainer(d AdminDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(chi.URLParam(r, "id"))
+		if err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "invalid id")
+			return
+		}
+		var in upsertContainerIn
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		alias := strings.TrimSpace(in.Alias)
+		upstream := strings.TrimSpace(in.UpstreamRepo)
+		if alias == "" {
+			writeJSONErr(w, http.StatusBadRequest, "alias required")
+			return
+		}
+		if !containerAliasAdminRe.MatchString(alias) {
+			writeJSONErr(w, http.StatusBadRequest, "invalid alias: only [A-Za-z0-9._-] allowed, no '/'")
+			return
+		}
+		if upstream == "" {
+			writeJSONErr(w, http.StatusBadRequest, "upstream_repo required")
+			return
+		}
+		row := &store.PackageContainer{
+			PackageID:    id,
+			Alias:        alias,
+			UpstreamRepo: upstream,
+			DisplayName:  strings.TrimSpace(in.DisplayName),
+			Source:       "",
+		}
+		if err := d.Store.UpsertContainer(r.Context(), row); err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s := agoidc.SessionFrom(r.Context())
+		d.Auditor.LogResourceMutation(actorEmail(s), "upsert_container", "package-container", id.String(), alias, clientIP(r))
+		writeJSON(w, http.StatusCreated, containerToDTO(row))
+	}
+}
+
+// deletePackageContainer removes a container row by alias. We don't restrict
+// by source: admins are trusted to manage their own data, and a manifest
+// re-apply will recreate any manifest-owned row that was deleted by hand.
+func deletePackageContainer(d AdminDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(chi.URLParam(r, "id"))
+		if err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "invalid id")
+			return
+		}
+		rawAlias, decErr := url.PathUnescape(chi.URLParam(r, "alias"))
+		if decErr != nil {
+			writeJSONErr(w, http.StatusBadRequest, "invalid alias encoding")
+			return
+		}
+		alias := strings.TrimSpace(rawAlias)
+		if alias == "" {
+			writeJSONErr(w, http.StatusBadRequest, "alias required")
+			return
+		}
+		if err := d.Store.DeleteContainer(r.Context(), id, alias); err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s := agoidc.SessionFrom(r.Context())
+		d.Auditor.LogResourceMutation(actorEmail(s), "delete_container", "package-container", id.String(), alias, clientIP(r))
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

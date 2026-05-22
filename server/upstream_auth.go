@@ -23,10 +23,12 @@ type UpstreamAuthenticator interface {
 }
 
 // BasicAuthenticator encodes the credential's username + decrypted PAT as an
-// HTTP Basic header. Used by 'ghcr' and 'oci-basic' kinds — any registry
-// where a static PAT is accepted directly on /v2/* without a token-exchange
-// handshake. The 401 from this Apply is a real "wrong credential" or "no
-// permission" — no retry.
+// HTTP Basic header. Used by 'oci-basic' kind — any registry where a static
+// PAT is accepted directly on /v2/* without a token-exchange handshake. The
+// 401 from this Apply is a real "wrong credential" or "no permission" — no
+// retry. (GHCR rejects Basic on manifest fetches and demands the Docker
+// registry v2 token-exchange dance, so it lives on BearerExchangeAuthenticator
+// despite accepting Basic on the realm-mint endpoint.)
 type BasicAuthenticator struct{}
 
 func (BasicAuthenticator) Apply(_ context.Context, req *http.Request, cred *store.UpstreamCredential, pat []byte) error {
@@ -45,7 +47,6 @@ func (BasicAuthenticator) OnUnauthorized(_ context.Context, _ *http.Response, _ 
 var (
 	authenticatorRegistryMu sync.RWMutex
 	authenticatorRegistry   = map[string]UpstreamAuthenticator{
-		"ghcr":      BasicAuthenticator{},
 		"oci-basic": BasicAuthenticator{},
 	}
 )

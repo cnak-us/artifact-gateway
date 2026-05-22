@@ -441,6 +441,118 @@ func (p *PG) DeletePackage(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// ---------- package containers ----------
+
+const packageContainerCols = `package_id, alias, upstream_repo, display_name, source, created_at, updated_at`
+
+func scanContainer(row pgx.Row) (*PackageContainer, error) {
+	var c PackageContainer
+	err := row.Scan(&c.PackageID, &c.Alias, &c.UpstreamRepo, &c.DisplayName, &c.Source, &c.CreatedAt, &c.UpdatedAt)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &c, nil
+}
+
+func (p *PG) ListContainersForPackage(ctx context.Context, packageID uuid.UUID) ([]PackageContainer, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT `+packageContainerCols+` FROM package_containers WHERE package_id=$1 ORDER BY alias ASC`,
+		packageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PackageContainer
+	for rows.Next() {
+		var c PackageContainer
+		if err := rows.Scan(&c.PackageID, &c.Alias, &c.UpstreamRepo, &c.DisplayName, &c.Source, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (p *PG) ListManifestContainersForPackage(ctx context.Context, packageID uuid.UUID) ([]PackageContainer, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT `+packageContainerCols+` FROM package_containers WHERE package_id=$1 AND source='manifest' ORDER BY alias ASC`,
+		packageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PackageContainer
+	for rows.Next() {
+		var c PackageContainer
+		if err := rows.Scan(&c.PackageID, &c.Alias, &c.UpstreamRepo, &c.DisplayName, &c.Source, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (p *PG) GetContainer(ctx context.Context, packageID uuid.UUID, alias string) (*PackageContainer, error) {
+	row := p.pool.QueryRow(ctx,
+		`SELECT `+packageContainerCols+` FROM package_containers WHERE package_id=$1 AND alias=$2`,
+		packageID, alias)
+	return scanContainer(row)
+}
+
+// UpsertContainer inserts a new row or updates upstream_repo/display_name on
+// conflict. display_name is preserved on conflict when the new row's value is
+// empty, and source is updated only when the new row's source is non-empty —
+// so UI re-saves (source='') don't downgrade manifest-owned rows and manifest
+// re-applies don't strip rows originally added via UI.
+func (p *PG) UpsertContainer(ctx context.Context, c *PackageContainer) error {
+	_, err := p.pool.Exec(ctx,
+		`INSERT INTO package_containers (package_id, alias, upstream_repo, display_name, source)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (package_id, alias) DO UPDATE
+		   SET upstream_repo = EXCLUDED.upstream_repo,
+		       display_name  = CASE WHEN EXCLUDED.display_name <> '' THEN EXCLUDED.display_name ELSE package_containers.display_name END,
+		       source        = CASE WHEN EXCLUDED.source       <> '' THEN EXCLUDED.source       ELSE package_containers.source       END,
+		       updated_at    = now()`,
+		c.PackageID, c.Alias, c.UpstreamRepo, c.DisplayName, c.Source)
+	return err
+}
+
+func (p *PG) DeleteContainer(ctx context.Context, packageID uuid.UUID, alias string) error {
+	tag, err := p.pool.Exec(ctx,
+		`DELETE FROM package_containers WHERE package_id=$1 AND alias=$2`, packageID, alias)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ReplaceManifestContainersForPackage atomically replaces the manifest-owned
+// container set for one package. UI rows (source='') are untouched.
+func (p *PG) ReplaceManifestContainersForPackage(ctx context.Context, packageID uuid.UUID, containers []PackageContainer) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM package_containers WHERE package_id=$1 AND source='manifest'`, packageID); err != nil {
+		return err
+	}
+	for _, c := range containers {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO package_containers (package_id, alias, upstream_repo, display_name, source)
+			 VALUES ($1, $2, $3, $4, 'manifest')`,
+			packageID, c.Alias, c.UpstreamRepo, c.DisplayName); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
 // ---------- licenses ----------
 
 const licenseCols = `id, license_id, customer, organization, tier, expires_at, lic_blob, revoked_at, source, created_at, updated_at`

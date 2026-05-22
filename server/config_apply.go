@@ -148,11 +148,27 @@ func exportManifest(ctx context.Context, st store.DataStore) (*apply.Manifest, e
 	pkgIDToSlug := make(map[string]string, len(pkgs))
 	for _, p := range pkgs {
 		pkgIDToSlug[p.ID.String()] = p.Slug
+		// Emit manifest-owned containers only so the round-trip is stable:
+		// importing the export does not adopt UI-created containers into
+		// manifest ownership.
+		var containers []apply.ContainerSpec
+		manifestContainers, err := st.ListManifestContainersForPackage(ctx, p.ID)
+		if err != nil {
+			return nil, fmt.Errorf("list containers for %s: %w", p.Slug, err)
+		}
+		for _, c := range manifestContainers {
+			containers = append(containers, apply.ContainerSpec{
+				Alias:        c.Alias,
+				UpstreamRepo: c.UpstreamRepo,
+				DisplayName:  c.DisplayName,
+			})
+		}
 		mf.Spec.Packages = append(mf.Spec.Packages, apply.PackageSpec{
 			Slug:                  p.Slug,
 			Source:                p.Source,
 			Path:                  p.Path,
 			UpstreamRepo:          p.UpstreamRepo,
+			Containers:            containers,
 			GitHubRepo:            p.GitHubRepo,
 			ReleasePattern:        p.ReleasePattern,
 			AssetPattern:          p.AssetPattern,

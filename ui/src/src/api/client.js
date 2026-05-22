@@ -89,6 +89,15 @@ export const admin = {
   deletePackage: (id) => api.delete(`/api/v1/packages/${id}`),
   probePackage: (id) => api.post(`/api/v1/packages/${id}/probe`, {}),
 
+  // Multi-container packages — admin-side CRUD over package_containers rows.
+  // body for upsert: { alias, upstreamRepo, displayName }. Server stamps
+  // source='' for UI-created rows (distinct from manifest-managed rows).
+  listPackageContainers: (packageId) => api.get(`/api/v1/packages/${packageId}/containers`),
+  upsertPackageContainer: (packageId, body) =>
+    api.post(`/api/v1/packages/${packageId}/containers`, body),
+  deletePackageContainer: (packageId, alias) =>
+    api.delete(`/api/v1/packages/${packageId}/containers/${encodeURIComponent(alias)}`),
+
   listLicenses: () => api.get('/api/v1/licenses'),
   getLicense: (id) => api.get(`/api/v1/licenses/${id}`),
   uploadLicense: (licBlob) => api.post('/api/v1/licenses', { lic_blob: licBlob }),
@@ -177,6 +186,15 @@ export const catalog = {
   listPackages: () => api.get('/catalog/api/packages'),
   getPackage: (slug) => api.get(`/catalog/api/packages/${encodeURIComponent(slug)}`),
   listTags: (slug) => api.get(`/catalog/api/packages/${encodeURIComponent(slug)}/tags`),
+
+  // Multi-container catalog endpoints. listContainers returns alias rows for
+  // packages that have multiple containers (empty array / 404 for single-repo
+  // packages). listContainerTags returns the semver-desc-sorted tag list for
+  // one alias under a package.
+  listContainers: (slug) =>
+    api.get(`/catalog/api/packages/${encodeURIComponent(slug)}/containers`),
+  listContainerTags: (slug, alias) =>
+    api.get(`/catalog/api/packages/${encodeURIComponent(slug)}/containers/${encodeURIComponent(alias)}/tags`),
   hostname: () => api.get('/catalog/api/hostname'),
   listDownloads: (slug) => api.get(`/download/${encodeURIComponent(slug)}`),
   signDownload: (slug, tag, asset) => api.post('/catalog/api/downloads/sign', { slug, tag, asset }),

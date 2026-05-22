@@ -33,6 +33,10 @@ type fakeStore struct {
 	licensesByID    map[uuid.UUID]*store.License
 	licensesList    []*store.License
 	grantsByLicense map[uuid.UUID][]store.PackageGrant
+
+	// containersByPkg keeps rows in insertion order per package; tests
+	// inspect the slice directly to check source tags survive reapply.
+	containersByPkg map[uuid.UUID][]*store.PackageContainer
 }
 
 func newFakeStore() *fakeStore {
@@ -41,6 +45,7 @@ func newFakeStore() *fakeStore {
 		packagesByID:    map[uuid.UUID]*store.Package{},
 		licensesByID:    map[uuid.UUID]*store.License{},
 		grantsByLicense: map[uuid.UUID][]store.PackageGrant{},
+		containersByPkg: map[uuid.UUID][]*store.PackageContainer{},
 	}
 }
 
@@ -307,6 +312,104 @@ func (*fakeStore) GrantedPackagesForLicense(context.Context, uuid.UUID) ([]store
 }
 func (*fakeStore) HasGrant(context.Context, uuid.UUID, uuid.UUID, string) (bool, error) {
 	panic("unused")
+}
+
+// --- package containers ----------------------------------------------------
+//
+// Real impls: the reconciler diffs against ListManifestContainersForPackage
+// and writes via ReplaceManifestContainersForPackage. UI-owned rows can be
+// seeded directly via UpsertContainer so tests can verify they survive a
+// manifest reapply.
+
+func (s *fakeStore) ListContainersForPackage(_ context.Context, pkg uuid.UUID) ([]store.PackageContainer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]store.PackageContainer, 0, len(s.containersByPkg[pkg]))
+	for _, c := range s.containersByPkg[pkg] {
+		out = append(out, *c)
+	}
+	return out, nil
+}
+
+func (s *fakeStore) ListManifestContainersForPackage(_ context.Context, pkg uuid.UUID) ([]store.PackageContainer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]store.PackageContainer, 0)
+	for _, c := range s.containersByPkg[pkg] {
+		if c.Source == "manifest" {
+			out = append(out, *c)
+		}
+	}
+	return out, nil
+}
+
+func (s *fakeStore) GetContainer(_ context.Context, pkg uuid.UUID, alias string) (*store.PackageContainer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.containersByPkg[pkg] {
+		if c.Alias == alias {
+			cp := *c
+			return &cp, nil
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
+func (s *fakeStore) UpsertContainer(_ context.Context, c *store.PackageContainer) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, ex := range s.containersByPkg[c.PackageID] {
+		if ex.Alias == c.Alias {
+			ex.UpstreamRepo = c.UpstreamRepo
+			if c.DisplayName != "" {
+				ex.DisplayName = c.DisplayName
+			}
+			if c.Source != "" {
+				ex.Source = c.Source
+			}
+			ex.UpdatedAt = time.Now()
+			s.containersByPkg[c.PackageID][i] = ex
+			return nil
+		}
+	}
+	cp := *c
+	cp.CreatedAt = time.Now()
+	cp.UpdatedAt = time.Now()
+	s.containersByPkg[c.PackageID] = append(s.containersByPkg[c.PackageID], &cp)
+	return nil
+}
+
+func (s *fakeStore) DeleteContainer(_ context.Context, pkg uuid.UUID, alias string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	list := s.containersByPkg[pkg]
+	for i, c := range list {
+		if c.Alias == alias {
+			s.containersByPkg[pkg] = append(list[:i], list[i+1:]...)
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+func (s *fakeStore) ReplaceManifestContainersForPackage(_ context.Context, pkg uuid.UUID, containers []store.PackageContainer) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := s.containersByPkg[pkg][:0]
+	for _, c := range s.containersByPkg[pkg] {
+		if c.Source != "manifest" {
+			kept = append(kept, c)
+		}
+	}
+	for _, c := range containers {
+		cp := c
+		cp.Source = "manifest"
+		cp.CreatedAt = time.Now()
+		cp.UpdatedAt = time.Now()
+		kept = append(kept, &cp)
+	}
+	s.containersByPkg[pkg] = kept
+	return nil
 }
 
 func (*fakeStore) ListRootKeys(context.Context) ([]store.RootKey, error)         { panic("unused") }

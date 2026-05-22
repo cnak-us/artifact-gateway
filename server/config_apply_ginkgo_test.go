@@ -45,12 +45,13 @@ func (configApplyFakeVerifier) VerifyLicenseBlob(raw string) (*cnaklicense.Licen
 type configApplyFakeStore struct {
 	mu sync.Mutex
 
-	creds            []store.UpstreamCredential
-	packages         []store.Package
-	licenses         []store.License
-	grants           map[uuid.UUID][]store.PackageGrant
-	insertCredErrOn  string // name of credential to fail on insert
-	insertedCredsOK  int
+	creds           []store.UpstreamCredential
+	packages        []store.Package
+	licenses        []store.License
+	grants          map[uuid.UUID][]store.PackageGrant
+	containersByPkg map[uuid.UUID][]store.PackageContainer
+	insertCredErrOn string // name of credential to fail on insert
+	insertedCredsOK int
 }
 
 func (s *configApplyFakeStore) ListUpstreamCredentials(context.Context) ([]store.UpstreamCredential, error) {
@@ -305,6 +306,59 @@ func (*configApplyFakeStore) ReplaceManifestContactsForLicense(context.Context, 
 func (*configApplyFakeStore) FindLicensesByContactEmail(context.Context, string) ([]store.License, error) {
 	panic("unused")
 }
+
+// Package-container stubs. The reconciler always invokes
+// ListManifestContainersForPackage and ReplaceManifestContainersForPackage on
+// every package spec. We record the last replace call so a test can assert
+// the (package, container set) tuple the handler forwarded.
+func (s *configApplyFakeStore) ListContainersForPackage(_ context.Context, pkg uuid.UUID) ([]store.PackageContainer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := append([]store.PackageContainer(nil), s.containersByPkg[pkg]...)
+	return out, nil
+}
+func (s *configApplyFakeStore) ListManifestContainersForPackage(_ context.Context, pkg uuid.UUID) ([]store.PackageContainer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]store.PackageContainer, 0)
+	for _, c := range s.containersByPkg[pkg] {
+		if c.Source == "manifest" {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+func (*configApplyFakeStore) GetContainer(context.Context, uuid.UUID, string) (*store.PackageContainer, error) {
+	panic("unused")
+}
+func (*configApplyFakeStore) UpsertContainer(context.Context, *store.PackageContainer) error {
+	panic("unused")
+}
+func (*configApplyFakeStore) DeleteContainer(context.Context, uuid.UUID, string) error {
+	panic("unused")
+}
+func (s *configApplyFakeStore) ReplaceManifestContainersForPackage(_ context.Context, pkg uuid.UUID, containers []store.PackageContainer) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.containersByPkg == nil {
+		s.containersByPkg = map[uuid.UUID][]store.PackageContainer{}
+	}
+	kept := s.containersByPkg[pkg][:0]
+	for _, c := range s.containersByPkg[pkg] {
+		if c.Source != "manifest" {
+			kept = append(kept, c)
+		}
+	}
+	for _, c := range containers {
+		cp := c
+		cp.Source = "manifest"
+		cp.CreatedAt = time.Now()
+		cp.UpdatedAt = time.Now()
+		kept = append(kept, cp)
+	}
+	s.containersByPkg[pkg] = kept
+	return nil
+}
 func (*configApplyFakeStore) GetBranding(context.Context) (*store.Branding, error) {
 	panic("unused")
 }
@@ -424,5 +478,50 @@ spec:
 		resp := postApply(manifest)
 		defer resp.Body.Close()
 		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+	})
+
+	It("persists package containers declared under packages[].containers", func() {
+		manifest := `
+apiVersion: artifact-gateway.cnak.us/v1
+kind: ArtifactGatewayConfig
+metadata:
+  name: test
+spec:
+  upstreamCredentials:
+    - name: good
+      kind: ghcr
+      username: bot
+      pat: tok
+  packages:
+    - slug: cnak-platform
+      source: oci
+      path: cnak-platform
+      upstreamCredential: good
+      kind: container
+      containers:
+        - alias: backend
+          upstreamRepo: cnak-us/backend
+        - alias: worker
+          upstreamRepo: cnak-us/worker
+          displayName: Worker
+`
+		resp := postApply(manifest)
+		defer resp.Body.Close()
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+		// One package row should be present and its upstream_repo cleared
+		// because the spec uses containers[].
+		Expect(st.packages).To(HaveLen(1))
+		Expect(st.packages[0].UpstreamRepo).To(Equal(""))
+
+		// And the container rows are present, tagged manifest.
+		got := st.containersByPkg[st.packages[0].ID]
+		Expect(got).To(HaveLen(2))
+		aliases := []string{}
+		for _, c := range got {
+			aliases = append(aliases, c.Alias)
+			Expect(c.Source).To(Equal("manifest"))
+		}
+		Expect(aliases).To(ConsistOf("backend", "worker"))
 	})
 })

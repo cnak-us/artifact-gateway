@@ -103,6 +103,23 @@ type Package struct {
 	UpdatedAt time.Time
 }
 
+// PackageContainer is one container under a multi-container package. All
+// containers under the same package share the package row's upstream
+// credential; only the upstream_repo and (URL-visible) alias differ. Legacy
+// single-container packages have zero PackageContainer rows and fall back to
+// the package's own upstream_repo column.
+type PackageContainer struct {
+	PackageID    uuid.UUID
+	Alias        string // single path segment; no '/'
+	UpstreamRepo string
+	DisplayName  string
+	// Source tags the row owner: '' (legacy / admin-UI-created) or 'manifest'
+	// (manifest-reconciler-owned). Prune passes only touch 'manifest' rows.
+	Source    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 type License struct {
 	ID           uuid.UUID
 	LicenseID    string // the cnaklic-issued ID inside the .lic
@@ -240,6 +257,21 @@ type DataStore interface {
 	InsertPackage(ctx context.Context, p *Package) error
 	UpdatePackage(ctx context.Context, p *Package) error
 	DeletePackage(ctx context.Context, id uuid.UUID) error
+
+	// package containers (multi-container packages)
+	// ListContainersForPackage returns every container (manifest- and UI-owned).
+	// ListManifestContainersForPackage returns only source='manifest' rows; used
+	// by the reconciler diff and export round-trip. GetContainer is the lookup
+	// the OCI proxy uses to resolve a (package, alias) URL to its upstream repo.
+	// UpsertContainer mirrors AddContact: preserves display_name on conflict
+	// when the new row's display_name is empty, and updates source only when
+	// the new row's source is non-empty.
+	ListContainersForPackage(ctx context.Context, packageID uuid.UUID) ([]PackageContainer, error)
+	ListManifestContainersForPackage(ctx context.Context, packageID uuid.UUID) ([]PackageContainer, error)
+	GetContainer(ctx context.Context, packageID uuid.UUID, alias string) (*PackageContainer, error)
+	UpsertContainer(ctx context.Context, c *PackageContainer) error
+	DeleteContainer(ctx context.Context, packageID uuid.UUID, alias string) error
+	ReplaceManifestContainersForPackage(ctx context.Context, packageID uuid.UUID, containers []PackageContainer) error
 
 	// licenses
 	ListLicenses(ctx context.Context) ([]License, error)

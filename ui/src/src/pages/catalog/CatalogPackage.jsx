@@ -43,14 +43,35 @@ export default function CatalogPackage() {
   const [pkg, setPkg] = useState(null);
   const [hostname, setHostname] = useState('artifacts.example.com');
   const [err, setErr] = useState(null);
+  // Multi-container probe. `null` means unresolved (loading); after the
+  // probe resolves we have either a non-empty array (multi-container mode)
+  // or an empty array (treat as single-container). 404 from the endpoint is
+  // also taken to mean "single-container" so the UI keeps working on
+  // gateways that don't have the new routes yet (E3 mock fallback).
+  const [containers, setContainers] = useState(null);
 
   useEffect(() => {
     setErr(null);
     setPkg(null);
+    setContainers(null);
     catalog.getPackage(slug).then(setPkg).catch(setErr);
     catalog.hostname().then((h) => {
       if (h?.hostname) setHostname(h.hostname);
     }).catch(() => { /* fall back to default */ });
+    catalog.listContainers(slug)
+      .then((res) => {
+        const list = asArray(res, 'containers');
+        setContainers(list);
+      })
+      .catch((e) => {
+        // Treat 404 / 400 / network-error as "no multi-container info" so
+        // we degrade to single-repo UI gracefully.
+        if (e instanceof ApiError && (e.status === 404 || e.status === 400)) {
+          setContainers([]);
+        } else {
+          setContainers([]);
+        }
+      });
   }, [slug]);
 
   // Raw identity from the catalog session. For Basic-auth customers this is
@@ -81,6 +102,12 @@ export default function CatalogPackage() {
 
   const Icon = kindIcon[pkg.kind] || MdInventory2;
   const isGH = pkg.source === 'github-release';
+  // We wait for the multi-container probe to resolve before deciding between
+  // InstallSection (single repo) and ContainerMatrixSection (multi). For GH
+  // releases the probe is irrelevant — DownloadsSection ships those.
+  const containersResolved = Array.isArray(containers);
+  const isMulti = !isGH && containersResolved && containers.length > 0;
+  const showInstallLoading = !isGH && !containersResolved;
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-10">
@@ -113,6 +140,17 @@ export default function CatalogPackage() {
           hostname={hostname}
           tokenId={tokenId}
           needsRealToken={needsRealToken}
+        />
+      ) : showInstallLoading ? (
+        <section className="mb-10"><Spinner /></section>
+      ) : isMulti ? (
+        <ContainerMatrixSection
+          pkg={pkg}
+          slug={slug}
+          hostname={hostname}
+          tokenId={tokenId}
+          needsRealToken={needsRealToken}
+          containers={containers}
         />
       ) : (
         <InstallSection
@@ -527,6 +565,191 @@ function AssetRow({ asset, slug, tag, hostname, tokenId }) {
         </Button>
       </div>
     </li>
+  );
+}
+
+// --- Multi-container matrix view -----------------------------------------
+
+function ContainerMatrixSection({ pkg, slug, hostname, tokenId, needsRealToken, containers }) {
+  // Per-container tag state. Map keyed by alias → { tags|null, err|null }.
+  // null tags means "not loaded yet". We fetch eagerly on mount so the table
+  // can show the newest tag + the compose snippet picks it up automatically.
+  const [tagsByAlias, setTagsByAlias] = useState({});
+
+  useEffect(() => {
+    setTagsByAlias({});
+    let cancelled = false;
+    for (const c of containers) {
+      catalog.listContainerTags(slug, c.alias)
+        .then((res) => {
+          if (cancelled) return;
+          const list = asArray(res, 'tags');
+          setTagsByAlias((prev) => ({ ...prev, [c.alias]: { tags: list, err: null } }));
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          const empty = e instanceof ApiError && e.status === 404;
+          setTagsByAlias((prev) => ({
+            ...prev,
+            [c.alias]: { tags: empty ? [] : null, err: empty ? null : e },
+          }));
+        });
+    }
+    return () => { cancelled = true; };
+  }, [slug, containers]);
+
+  // First tag in the server-returned list is the newest (E1 sorts semver-desc).
+  const latestTag = (alias) => {
+    const state = tagsByAlias[alias];
+    if (!state || !state.tags || state.tags.length === 0) return 'latest';
+    return state.tags[0];
+  };
+
+  const composeSnippet = useMemo(() => {
+    const lines = ['services:'];
+    for (const c of containers) {
+      const svc = serviceName(c);
+      const tag = latestTag(c.alias);
+      lines.push(`  ${svc}:`);
+      lines.push(`    image: ${hostname}/${pkg.path}/${c.alias}:${tag}`);
+    }
+    return lines.join('\n');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [containers, tagsByAlias, hostname, pkg.path]);
+
+  return (
+    <>
+      <section className="mb-10">
+        <h2 className="text-lg font-semibold mb-3">Containers</h2>
+        <p className="text-sm text-g-text-secondary mb-4">
+          This package publishes multiple containers. Each pulls independently
+          from <code className="font-mono text-xs">{hostname}/{pkg.path}/&lt;alias&gt;:&lt;tag&gt;</code>.
+        </p>
+
+        {needsRealToken && <TokenIdCallout />}
+
+        <div className="rounded border border-g-border-weak divide-y divide-g-border-weak overflow-hidden">
+          {containers.map((c) => (
+            <ContainerCard
+              key={c.alias}
+              container={c}
+              slug={slug}
+              hostname={hostname}
+              path={pkg.path}
+              tokenId={tokenId}
+              tagsState={tagsByAlias[c.alias]}
+            />
+          ))}
+        </div>
+
+        <p className="mt-2 text-xs text-g-text-disabled">
+          Substitute{' '}
+          <code className="px-1 py-0.5 bg-g-secondary rounded font-mono text-[11px]">&lt;your secret&gt;</code>{' '}
+          with the value you used to sign in. One <code className="font-mono text-[11px]">docker login {hostname}</code>{' '}
+          authenticates all containers under this package.
+        </p>
+      </section>
+
+      <ComposeSnippetSection snippet={composeSnippet} />
+    </>
+  );
+}
+
+function serviceName(c) {
+  const raw = (c.display_name && c.display_name.trim()) || c.alias;
+  // Compose service names must match `^[A-Za-z0-9._-]+$`. Aliases already
+  // do (server-enforced), but display_name is free text — sanitize.
+  return raw.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || c.alias;
+}
+
+function ContainerCard({ container, slug, hostname, path, tokenId, tagsState }) {
+  const [expanded, setExpanded] = useState(false);
+  const tags = tagsState?.tags;
+  const tagsErr = tagsState?.err;
+  const newest = (tags && tags.length > 0) ? tags[0] : null;
+  const pullTag = newest || 'latest';
+  const pullCmd = `docker pull ${hostname}/${path}/${container.alias}:${pullTag}`;
+
+  return (
+    <div className="bg-g-primary">
+      <div className="px-4 py-3 grid grid-cols-12 gap-3 items-start">
+        <div className="col-span-12 sm:col-span-3 min-w-0">
+          <div className="font-medium text-g-text truncate">
+            {container.display_name || container.alias}
+          </div>
+          <div className="font-mono text-xs text-g-text-secondary truncate">{container.alias}</div>
+          {newest && <div className="text-[11px] text-g-text-disabled mt-0.5 font-mono">{newest}</div>}
+          {tags && tags.length === 0 && !tagsErr && (
+            <div className="text-[11px] text-g-text-disabled mt-0.5">no tags</div>
+          )}
+          {tagsErr && (
+            <div className="text-[11px] text-g-red-text mt-0.5">tags unavailable</div>
+          )}
+        </div>
+        <div className="col-span-12 sm:col-span-9">
+          <CopyableCode value={pullCmd} />
+          {tags === undefined && (
+            <div className="mt-1.5 text-[11px] text-g-text-disabled">Loading tags…</div>
+          )}
+          {tags && tags.length > 0 && (
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={() => setExpanded((v) => !v)}
+                className="text-[11px] text-g-text-secondary hover:text-g-text inline-flex items-center gap-0.5"
+                aria-expanded={expanded}
+              >
+                {expanded ? <MdExpandLess /> : <MdExpandMore />}
+                {expanded ? 'Hide' : 'Show'} versions ({tags.length})
+              </button>
+              {expanded && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {tags.slice(0, 20).map((t) => (
+                    <span
+                      key={t}
+                      className="px-1.5 py-0.5 rounded text-[11px] font-mono border border-g-border-weak bg-g-secondary text-g-text-secondary"
+                    >
+                      {t}
+                    </span>
+                  ))}
+                  {tags.length > 20 && (
+                    <span className="text-[11px] text-g-text-disabled self-center">
+                      +{tags.length - 20} older
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ComposeSnippetSection({ snippet }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section className="mb-10">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="text-sm text-g-text-link hover:underline inline-flex items-center gap-1"
+        aria-expanded={open}
+      >
+        {open ? <MdExpandLess /> : <MdExpandMore />}
+        Compose snippet
+      </button>
+      {open && (
+        <div className="mt-3">
+          <p className="text-xs text-g-text-secondary mb-2">
+            Paste into a <code className="font-mono">compose.yaml</code>. Each
+            service pulls the newest tag for its container at the time this page was loaded.
+          </p>
+          <CopyableCode value={snippet} language="yaml" />
+        </div>
+      )}
+    </section>
   );
 }
 

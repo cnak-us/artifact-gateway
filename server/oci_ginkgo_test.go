@@ -345,3 +345,226 @@ func toHex(b []byte) string {
 // b32 keeps an import live where ginkgo would otherwise warn during local
 // iteration. Safe to remove once the suite is fully fleshed out.
 var _ = base32.StdEncoding
+
+var _ = Describe("OCI server (multi-container)", func() {
+	// This Describe block stands up its own router so the second package
+	// ("cnak-platform" with containers backend + worker) doesn't collide
+	// with the single-container fixture from the outer Describe.
+	var (
+		st       *fakeStore
+		signer    *auth.JWTSigner
+		crypto    *auth.Crypto
+		ver       *stubVerifier
+		auditor   *audit.Auditor
+		cfg       *config.Config
+		publicSrv *httptest.Server
+		client    *http.Client
+
+		licRowID uuid.UUID
+		pkgID    uuid.UUID
+		tokenID  string
+		secret   string
+	)
+
+	BeforeEach(func() {
+		st = newFakeStore()
+
+		jwtKey := make([]byte, 32)
+		_, _ = rand.Read(jwtKey)
+		var err error
+		signer, err = auth.NewJWTSigner(toHex(jwtKey), "artifact-gateway", "test-host:9999", time.Minute)
+		Expect(err).NotTo(HaveOccurred())
+
+		kek := make([]byte, 32)
+		_, _ = rand.Read(kek)
+		crypto, err = auth.NewCrypto(base64.StdEncoding.EncodeToString(kek))
+		Expect(err).NotTo(HaveOccurred())
+
+		ver = &stubVerifier{licID: "lic-multi", expiry: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}
+		auditor = audit.NewAuditor(nil, st, slog.Default())
+		cfg = &config.Config{
+			PublicPort:       0,
+			ExternalHostname: "test-host:9999",
+			TokenTTLSeconds:  60,
+		}
+
+		// Production contract: one credential per package shared across
+		// containers. Stand up a single upstream server that routes by
+		// upstreamRepo so we can assert the proxy chose the right per-alias
+		// repo path.
+		multiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasPrefix(r.URL.Path, "/v2/up/backend/") && strings.Contains(r.URL.Path, "/manifests/"):
+				w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+				w.Header().Set("Docker-Content-Digest", "sha256:backend")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"upstream":"backend"}`))
+			case strings.HasPrefix(r.URL.Path, "/v2/up/worker/") && strings.Contains(r.URL.Path, "/manifests/"):
+				w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+				w.Header().Set("Docker-Content-Digest", "sha256:worker")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"upstream":"worker"}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		DeferCleanup(multiSrv.Close)
+
+		credID := uuid.New()
+		sealed, _ := crypto.Seal([]byte("ghp_FAKE_PAT"))
+		st.upstreamByID[credID] = &store.UpstreamCredential{
+			ID: credID, Name: "test-upstream", Kind: "oci-basic", BaseURL: multiSrv.URL,
+			Username: "robot", PATEnc: sealed, PATFingerprint: "abcd1234",
+		}
+
+		// Multi-container package: cnak-platform, with two containers under it.
+		pkgID = uuid.New()
+		pkg := &store.Package{
+			ID: pkgID, Slug: "cnak-platform", Path: "cnak-platform",
+			UpstreamRepo: "", UpstreamCredentialID: credID,
+			Kind: "container", DisplayName: "CNAK Platform",
+		}
+		st.packagesByPath["cnak-platform"] = pkg
+		st.packagesByID[pkgID] = pkg
+		st.packagesBySlug["cnak-platform"] = pkg
+
+		st.containers[containerKey{pkgID, "backend"}] = &store.PackageContainer{
+			PackageID: pkgID, Alias: "backend", UpstreamRepo: "up/backend",
+		}
+		st.containers[containerKey{pkgID, "worker"}] = &store.PackageContainer{
+			PackageID: pkgID, Alias: "worker", UpstreamRepo: "up/worker",
+		}
+
+		licRowID = uuid.New()
+		st.licenses[licRowID] = &store.License{
+			ID: licRowID, LicenseID: "lic-multi", Customer: "Acme",
+			Tier: cnaklicense.TierEnterprise, LicBlob: "valid-blob",
+		}
+
+		gen, err := auth.GenerateCustomerToken()
+		Expect(err).NotTo(HaveOccurred())
+		hash, err := auth.HashSecret(gen.Secret)
+		Expect(err).NotTo(HaveOccurred())
+		tokenID = gen.TokenID
+		secret = gen.Secret
+		ctRow := &store.CustomerToken{
+			ID: uuid.New(), TokenID: tokenID, SecretHash: hash, LicenseID: licRowID,
+		}
+		st.customerTokens[tokenID] = ctRow
+		st.customerByID[ctRow.ID] = ctRow
+
+		st.grants[grantKey{licRowID, pkgID, "pull"}] = true
+
+		r := chi.NewRouter()
+		r.Use(server.RequestID)
+		r.Use(server.Logger(slog.Default()))
+		up := server.NewUpstream(crypto, st, auditor, slog.Default())
+		server.MountOCI(r, server.Deps{
+			Store:    st,
+			Signer:   signer,
+			Crypto:   crypto,
+			Cache:    nil,
+			Verifier: ver,
+			Auditor:  auditor,
+			Cfg:      cfg,
+			Upstream: up,
+			Logger:   slog.Default(),
+		})
+		publicSrv = httptest.NewServer(r)
+		client = &http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+	})
+
+	AfterEach(func() {
+		publicSrv.Close()
+	})
+
+	It("routes /v2/cnak-platform/backend/manifests/v1 to the backend upstream repo", func() {
+		tok := mintJWT(signer, tokenID, []auth.Access{
+			{Type: "repository", Name: "cnak-platform/backend", Actions: []string{"pull"}},
+		})
+		req, _ := http.NewRequest(http.MethodGet, publicSrv.URL+"/v2/cnak-platform/backend/manifests/v1", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		resp, err := client.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		defer resp.Body.Close()
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+		Expect(resp.Header.Get("Docker-Content-Digest")).To(Equal("sha256:backend"))
+		body, _ := io.ReadAll(resp.Body)
+		Expect(string(body)).To(ContainSubstring(`"upstream":"backend"`))
+	})
+
+	It("routes /v2/cnak-platform/worker/manifests/v1 to the worker upstream repo", func() {
+		tok := mintJWT(signer, tokenID, []auth.Access{
+			{Type: "repository", Name: "cnak-platform/worker", Actions: []string{"pull"}},
+		})
+		req, _ := http.NewRequest(http.MethodGet, publicSrv.URL+"/v2/cnak-platform/worker/manifests/v1", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		resp, err := client.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		defer resp.Body.Close()
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+		Expect(resp.Header.Get("Docker-Content-Digest")).To(Equal("sha256:worker"))
+	})
+
+	It("404s NAME_UNKNOWN on a pull at the bare multi-container path", func() {
+		// /v2/cnak-platform/manifests/v1 — the package itself has children,
+		// so there is no implicit root repo.
+		tok := mintJWT(signer, tokenID, []auth.Access{
+			{Type: "repository", Name: "cnak-platform", Actions: []string{"pull"}},
+		})
+		req, _ := http.NewRequest(http.MethodGet, publicSrv.URL+"/v2/cnak-platform/manifests/v1", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		resp, err := client.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		defer resp.Body.Close()
+		Expect(resp.StatusCode).To(Equal(http.StatusNotFound))
+		body, _ := io.ReadAll(resp.Body)
+		Expect(string(body)).To(ContainSubstring("NAME_UNKNOWN"))
+	})
+
+	It("404s NAME_UNKNOWN on an unknown alias under the package", func() {
+		tok := mintJWT(signer, tokenID, []auth.Access{
+			{Type: "repository", Name: "cnak-platform/nonexistent", Actions: []string{"pull"}},
+		})
+		req, _ := http.NewRequest(http.MethodGet, publicSrv.URL+"/v2/cnak-platform/nonexistent/manifests/v1", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		resp, err := client.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		defer resp.Body.Close()
+		Expect(resp.StatusCode).To(Equal(http.StatusNotFound))
+		body, _ := io.ReadAll(resp.Body)
+		Expect(string(body)).To(ContainSubstring("NAME_UNKNOWN"))
+	})
+
+	It("mints a JWT scope for repository:cnak-platform/backend when granted", func() {
+		body := doTokenMint(client, publicSrv.URL, cfg.ExternalHostname, tokenID, secret,
+			"repository:cnak-platform/backend:pull")
+		claims, err := signer.Verify(body.Token)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(claims.Access).To(HaveLen(1))
+		Expect(claims.Access[0].Name).To(Equal("cnak-platform/backend"))
+		Expect(claims.Access[0].Actions).To(ConsistOf("pull"))
+	})
+
+	It("drops the scope when the license has no grant on the package", func() {
+		// Revoke the only grant so the lookup yields HasGrant=false.
+		delete(st.grants, grantKey{licRowID, pkgID, "pull"})
+		body := doTokenMint(client, publicSrv.URL, cfg.ExternalHostname, tokenID, secret,
+			"repository:cnak-platform/backend:pull")
+		claims, err := signer.Verify(body.Token)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(claims.Access).To(BeEmpty())
+	})
+
+	It("drops the scope when the alias does not exist", func() {
+		body := doTokenMint(client, publicSrv.URL, cfg.ExternalHostname, tokenID, secret,
+			"repository:cnak-platform/nonexistent:pull")
+		claims, err := signer.Verify(body.Token)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(claims.Access).To(BeEmpty())
+	})
+})
