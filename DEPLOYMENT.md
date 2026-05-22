@@ -1,9 +1,7 @@
 # artifact-gateway — Deployment Story
 
 This document is the canonical reference for shipping and operating
-`artifact-gateway`. It complements (and never contradicts) the
-implementation plan at
-`/Users/wcrum/.claude/plans/linked-exploring-sutton.md`.
+`artifact-gateway`.
 
 ## Surfaces we ship
 
@@ -37,33 +35,46 @@ implementation plan at
 
 ## Environment variable matrix
 
-Cross-referenced against `config/config.go`. Every var the binary reads.
+Every var the binary reads, cross-referenced against `config/config.go` and the
+direct `os.Getenv` calls in `main.go`.
 
 | Var                       | Default                   | Source            | Secret? | Notes |
 | ------------------------- | ------------------------- | ----------------- | ------- | ----- |
 | `PUBLIC_PORT`             | `8080`                    | ConfigMap         | no      | OCI + admin + catalog listener |
 | `MANAGEMENT_PORT`         | `8090`                    | ConfigMap         | no      | `/health/*` + `/metrics` |
 | `EXTERNAL_HOSTNAME`       | `localhost:8080`          | ConfigMap         | no      | **MUST match the TLS cert SAN exactly** — see Cert/hostname constraint |
-| `UPSTREAM_GITHUB_API`     | `https://api.github.com`  | ConfigMap         | no      | GitHub REST API for non-OCI download sources (releases). Override to a GHES URL like `https://ghes.example.com/api/v3` |
 | `TOKEN_TTL_SECONDS`       | `300`                     | ConfigMap         | no      | OCI bearer JWT lifetime |
+| `TLS_CERT_FILE`           | (empty)                   | not chart-wired   | no      | Set with `TLS_KEY_FILE` to enable in-process HTTPS on the public listener. Leave blank when an upstream LB/Cloudflare terminates TLS. Management listener stays HTTP. |
+| `TLS_KEY_FILE`            | (empty)                   | not chart-wired   | no      | See `TLS_CERT_FILE`. |
+| `COOKIE_SECURE`           | auto                      | not chart-wired   | no      | Secure flag on session cookies. Defaults to true; auto-falls-back to false when `EXTERNAL_HOSTNAME` points at localhost. |
 | `OIDC_AUTOPROVISION`      | `false`                   | ConfigMap         | no      | When true, new OIDC users land as `role='viewer'` |
-| `LOG_LEVEL`               | `info`                    | ConfigMap         | no      | `debug|info|warn|error` |
-| `LOG_FORMAT`              | `json`                    | ConfigMap         | no      | `json|text` |
+| `OIDC_DEFAULT_PROVIDER`   | `dex`                     | not chart-wired   | no      | Provider name the gateway redirects unauthenticated admin requests to. |
+| `STATIC_ADMINS`           | (empty)                   | Secret            | **yes** | Comma-separated `email:password` pairs for break-glass / CI admins. Sessions issued for these entries bypass the DB. |
+| `LOG_LEVEL`               | `info`                    | ConfigMap         | no      | `debug\|info\|warn\|error` |
+| `LOG_FORMAT`              | `json`                    | ConfigMap         | no      | `json\|text` |
 | `NATS_URL`                | (empty)                   | ConfigMap         | no      | Empty disables NATS publish + license cache invalidation |
 | `NATS_CREDENTIALS_FILE`   | (empty)                   | Mounted file path | no      | Path to a `.creds` file mounted from `nats.credentialsSecret` |
 | `NATS_AUTH_TOKEN`         | (empty)                   | Secret            | **yes** | Only used when NATS is password-authed |
 | `POD_NAME`                | (empty)                   | Downward API      | no      | For HA cache key disambiguation |
 | `DATABASE_URL`            | (empty)                   | Secret            | **yes** | `postgres://user:pass@host:5432/db?sslmode=require` |
-| `KEK_BASE64`              | (empty)                   | Secret            | **yes** | 32 random bytes, base64. **AES-GCM KEK for stored ghcr PATs.** Losing this bricks everything at rest. |
+| `KEK_BASE64`              | (empty)                   | Secret            | **yes** | 32 random bytes, base64. **AES-GCM KEK for stored upstream PATs and issuer secrets.** Losing this bricks everything at rest. |
 | `SESSION_SIGNING_KEY`     | (empty)                   | Secret            | **yes** | Hex, ≥ 32 bytes. HMAC-SHA256 for admin/catalog cookies |
 | `JWT_SIGNING_KEY`         | (empty)                   | Secret            | **yes** | Hex, ≥ 32 bytes. HMAC-SHA256 for OCI bearer JWTs |
 | `SERVICE_TOKEN`           | (empty)                   | Secret            | **yes** | Shared secret for any internal service callers |
 | `ADMIN_BOOTSTRAP_EMAIL`   | (empty)                   | Secret            | **yes** | One-time. Used only if no users exist at startup |
 | `ADMIN_BOOTSTRAP_PASSWORD`| (empty)                   | Secret            | **yes** | One-time. Rotate after first login. |
+| `DEX_ISSUER_URL`          | (empty)                   | ConfigMap         | no      | When set with `DEX_CLIENT_ID` + `DEX_CLIENT_SECRET`, the gateway auto-provisions a `dex` OIDC provider row on startup. |
+| `DEX_CLIENT_ID`           | (empty)                   | ConfigMap         | no      | See `DEX_ISSUER_URL`. |
+| `DEX_CLIENT_SECRET`       | (empty)                   | Secret            | **yes** | See `DEX_ISSUER_URL`. |
+| `DEX_DISCOVERY_URL`       | (empty)                   | not chart-wired   | no      | Override the in-network discovery URL for the `dex` provider when it differs from the browser-visible issuer (compose dev). |
+| `CONFIG_FILE`             | (empty)                   | not chart-wired   | no      | Path to a declarative-config YAML applied at startup. Hard-exits on error. Read directly by `main.go`; not exposed by the chart today. |
 
 The chart enforces "secret → Secret, non-secret → ConfigMap" with
 `envFrom:` on both. There is no inline `env:` other than `POD_NAME`
-from the downward API.
+from the downward API. Vars marked **not chart-wired** are read by the
+binary but the chart doesn't surface them as first-class values today
+— set them by patching `templates/configmap.yaml` (non-secret) or
+`templates/secret-env.yaml` (secret) in a values fork.
 
 ## Upstream credentials: required PAT scopes
 
@@ -74,7 +85,8 @@ credential `kind`:
 | Kind         | Required scope / permission                                                                                       |
 |--------------|-------------------------------------------------------------------------------------------------------------------|
 | `ghcr`       | Classic PAT with `read:packages`. GHCR does not support fine-grained PATs for `docker pull`.                       |
-| `github-api` | Classic PAT with `repo` (private) or `public_repo` (public). Fine-grained: Contents=Read, Metadata=Read.           |
+| `github-api` | Classic PAT with `repo` (private) or `public_repo` (public). Fine-grained: Contents=Read, Metadata=Read. Used for GitHub Releases asset downloads (see `DOWNLOADS.md`). |
+| `gitlab-api` | PAT or Project Access Token with `read_api` (and `read_repository` for private projects). Used for GitLab Releases asset downloads. `base_url` defaults to `https://gitlab.com`; set for self-hosted GitLab. |
 | `oci-basic`  | Pull/read on the target repository. Gitea: `read:package`. Harbor: robot account with pull+read. Artifactory: Identity Token with repo read. ACR scope-mapped tokens also fit here. Self-hosted instances can paste an internal CA chain into `ca_bundle_pem`. |
 | `dockerhub`  | Docker Hub PAT with Read scope (`hub.docker.com → Account Settings → Security`). Host is pinned to `registry-1.docker.io`. |
 | `quay`       | Robot account name (`org+robotname`) and robot token with read permission on the target repos. Defaults to `quay.io`; set `base_url` for self-hosted Quay. |
@@ -85,19 +97,21 @@ credential `kind`:
 
 ## Secret model and KEK rotation
 
-`KEK_BASE64` is a Key Encryption Key, not a Data Encryption Key. It
-wraps the per-row AES-GCM nonces for `upstream_credentials.pat_enc`
-(ghcr PATs). It is the single most important secret in the system.
+`KEK_BASE64` is the AES-GCM key that wraps every encrypted column at
+rest: `upstream_credentials.pat_enc`, `upstream_credentials.issuer_secret_enc`,
+`oidc_providers.client_secret_enc`, and `root_keys.private_key_enc`.
+It is the single most important secret in the system.
 
 **What happens if KEK is lost:**
 
 > **Every encrypted column at rest becomes unrecoverable.** The
-> `upstream_credentials` table is unreadable; you cannot mint OCI
-> tokens for any package because the gateway cannot decrypt the
-> upstream PAT. Customer tokens stop working. Operationally, recovery
-> is *re-enter every ghcr PAT*. There is no backup story for the KEK
-> itself — back it up out-of-band (e.g. password manager, KMS) the
-> moment you generate it.
+> gateway cannot decrypt any upstream credential, so no OCI tokens
+> can be minted and no Releases downloads can be proxied. Customer
+> tokens stop working. OIDC client secrets and any private root keys
+> are also unreadable. Operationally, recovery is *re-enter every
+> upstream credential and OIDC client secret*. There is no backup
+> story for the KEK itself — back it up out-of-band (e.g. password
+> manager, KMS) the moment you generate it.
 
 **Rotation playbook (manual, v1):**
 
@@ -179,7 +193,7 @@ counter lands, so do not enable HPA without that work.
 | `JWT_SIGNING_KEY`          | Outstanding OCI tokens invalid (~5 min impact) | edit Secret → rollout restart |
 | `SERVICE_TOKEN`            | Any internal caller using old token rejected | edit Secret → rollout restart, then update callers |
 | `ADMIN_BOOTSTRAP_PASSWORD` | None at runtime (used only when no users exist) | edit Secret freely |
-| **`KEK_BASE64`**           | **Do not rotate without `--rekey` (not in v1).** Replacing the KEK without re-encrypting orphans every stored ghcr PAT. | (see KEK Rotation Playbook above) |
+| **`KEK_BASE64`**           | **Do not rotate without `--rekey` (not in v1).** Replacing the KEK without re-encrypting orphans every encrypted column at rest. | (see KEK Rotation Playbook above) |
 
 ### Observability
 

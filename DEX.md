@@ -142,20 +142,20 @@ Each new connector needs its own OAuth/SAML app on the upstream, and that upstre
 
 ---
 
-## 7. Theme
+## 6. Theme
 
 The Dex login pages use a custom theme at `dex/web/themes/artifact-gateway/` that matches the artifact-gateway SPA's dark design system.
 
-- **`dex/web/themes/artifact-gateway/styles.css`** — all visual styles (CSS variables, card layout, connector buttons, form inputs, alerts). Edit this to change colors or component appearance.
-- **`dex/web/themes/artifact-gateway/logo.svg`** — the product logo SVG (hexagon + crosshair, accent blue `#6e9fff`).
-- **`dex/web/themes/artifact-gateway/favicon.png`** — browser tab icon.
+- **`styles.css`** — all visual styles (CSS variables, card layout, connector buttons, form inputs, alerts). Edit this to change colors or component appearance.
+- **`logo.svg`** — the product logo SVG (hexagon + crosshair, accent blue `#6e9fff`).
+- **`favicon.png`** — browser tab icon.
 - **`dex/web/templates/`** — Dex template overrides (header, footer, login, password, approval, device, error, oob). Edit copy here; keep all `{{ ... }}` template variables intact or Dex will fail to render.
 
 The theme is mounted into the Dex container at `/srv/dex/web` via `docker-compose.yml` and activated by the `frontend:` block in `config/dex.dev.yaml`.
 
 ---
 
-## 6. Production notes
+## 7. Production notes
 
 The dev config is intentionally not production-safe. Before exposing Dex to anything real:
 

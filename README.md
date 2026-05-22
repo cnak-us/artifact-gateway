@@ -1,12 +1,12 @@
 # artifact-gateway
 
-Kubernetes-native OCI auth gateway. Proxies `ghcr.io` for license-gated customer access without exposing the upstream PAT.
+Kubernetes-native OCI auth gateway. Proxies upstream OCI registries (GHCR, Docker Hub, Quay, GitLab, ECR, GAR, ACR, Harbor, Gitea, Artifactory, …) for license-gated customer access without exposing the upstream PAT. Also gates non-OCI downloads from GitHub and GitLab Releases.
 
 ## What it does
 
-- Admins register packages (containers, helm charts, binaries-as-OCI) and an upstream `ghcr` credential
+- Admins register upstream credentials (one per registry) and packages (containers, helm charts, binaries, release-asset bundles)
 - Admins generate per-customer credentials bound to a `cnaklic` license
-- Customers use ordinary `docker pull`, `helm pull oci://`, `oras pull` — the gateway re-checks the license on every token mint and proxies to ghcr server-side
+- Customers use ordinary `docker pull`, `helm pull oci://`, `oras pull`, or `curl /download/...` — the gateway re-checks the license on every token mint and proxies upstream server-side
 - Single Go binary, embedded React UI, Postgres backing store
 
 ## Endpoints
@@ -95,6 +95,7 @@ Admins register one credential per upstream registry. The credential `kind` sele
 |--------------|----------------------------------------|--------------------------------------------------------------------------------------------------------------|------------------------------------------|
 | `ghcr`       | OCI manifests/blobs from `ghcr.io`     | Classic PAT with `read:packages`. GHCR does not support fine-grained PATs for `docker pull`.                 | —                                        |
 | `github-api` | GitHub Releases asset downloads        | Classic PAT with `repo` (private) or `public_repo` (public). Fine-grained: Contents=Read, Metadata=Read.     | —                                        |
+| `gitlab-api` | GitLab Releases asset downloads        | PAT or Project Access Token with `read_api` (and `read_repository` for private projects).                    | `base_url` (optional; defaults to `https://gitlab.com`) |
 | `oci-basic`  | Any Basic-auth OCI registry            | Token with pull/read on the target repository. Gitea: `read:package`. Harbor: robot account with pull+read. Artifactory: Identity Token with repo read. ACR scope-mapped tokens also fit here. | `base_url` (required); optional `ca_bundle_pem`, `insecure_skip_tls_verify` |
 | `dockerhub`  | Docker Hub                             | Docker Hub PAT with Read scope. Host pinned to `registry-1.docker.io`.                                       | —                                        |
 | `quay`       | Quay.io (or self-hosted)               | Robot account name + token with `read` on target repos.                                                      | `base_url` (optional; default `https://quay.io`) |
@@ -103,7 +104,7 @@ Admins register one credential per upstream registry. The credential `kind` sele
 | `gar`        | Google Artifact Registry / GCR         | Service account with `roles/artifactregistry.reader` (or `storage.objectViewer` on legacy GCR backing bucket). | `issuer_secret` (raw SA JSON), `base_url` (e.g. `https://us-docker.pkg.dev`) |
 | `acr-aad`    | Azure Container Registry via AAD       | Service principal with AcrPull on the registry.                                                              | `issuer_secret` `{clientId, clientSecret}`, `issuer_config` `{tenantId, registry}`, `base_url` |
 
-`oci-basic` is the catch-all for any registry that accepts a static PAT directly on `/v2/*` (Gitea, Forgejo, Harbor, JFrog Artifactory, ACR scope-mapped tokens, Zot, distribution/distribution). The `dockerhub`/`quay`/`gitlab` kinds layer a Docker token-exchange (`401 → realm → bearer`) handshake on top — the proxy mints a scope-pinned JWT on demand and caches it per credential. The `ecr`/`gar`/`acr-aad` kinds mint short-lived registry tokens from a stored cloud issuer credential and refresh in the background before expiry. For self-hosted instances behind an internal CA, paste the cert chain into `ca_bundle_pem`.
+`oci-basic` is the catch-all for any registry that accepts a static PAT directly on `/v2/*` (Gitea, Forgejo, Harbor, JFrog Artifactory, ACR scope-mapped tokens, Zot, distribution/distribution). The `dockerhub`/`quay`/`gitlab` kinds layer a Docker token-exchange (`401 → realm → bearer`) handshake on top — the proxy mints a scope-pinned JWT on demand and caches it per credential. The `ecr`/`gar`/`acr-aad` kinds mint short-lived registry tokens from a stored cloud issuer credential and refresh in the background before expiry. `github-api` and `gitlab-api` are the non-OCI variants used for Releases downloads (see [`DOWNLOADS.md`](DOWNLOADS.md)). For self-hosted instances behind an internal CA, paste the cert chain into `ca_bundle_pem`.
 
 ## Production deployment
 
