@@ -71,7 +71,7 @@ ingress, `localhost:5000` upstream. Never use it outside of kind/minikube.
 When the chart is published as an OCI artifact:
 
 ```bash
-helm install artifact-gateway oci://ghcr.io/cnak-us/charts/artifact-gateway \
+helm install artifact-gateway oci://ghcr.io/cnak-us/artifact-gateway/chart \
   --version 0.1.0 \
   --values your-values.yaml
 ```

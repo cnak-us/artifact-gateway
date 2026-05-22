@@ -21,11 +21,12 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: cnak-us/artifact-gateway
-  # Helm chart is published to the same OCI namespace as the image, mirroring
-  # the cnak-chart convention (oci://ghcr.io/cnak-us/cnak/chart). For
-  # artifact-gateway the chart name == image name, so the chart lives at
-  # oci://ghcr.io/cnak-us/artifact-gateway/<chart-name> after `helm push`.
-  CHART_OCI_REPO: ghcr.io/cnak-us/artifact-gateway
+  # Push to ghcr.io/cnak-us/artifact-gateway/chart (not /artifact-gateway) so the
+  # OCI path is clean and stable. The chart name inside Chart.yaml remains
+  # "artifact-gateway", but oras lets us decouple the OCI repository path from
+  # the internal chart name. Mirrors the cnak-chart convention
+  # (oci://ghcr.io/cnak-us/cnak/chart).
+  CHART_OCI_REPO: ghcr.io/cnak-us/artifact-gateway/chart
 
 jobs:
   setup:
@@ -138,12 +139,15 @@ jobs:
         with:
           version: v3.16.2
 
-      - name: Log in to GHCR for Helm
+      - name: Set up oras
+        uses: oras-project/setup-oras@v2
+        with:
+          version: '1.2.0'
+
+      - name: Install yq
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | \
-            helm registry login ${{ env.REGISTRY }} \
-              -u ${{ github.actor }} \
-              --password-stdin
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
 
       - name: Resolve chart dependencies
         run: helm dependency update chart/
@@ -153,22 +157,67 @@ jobs:
         run: |
           VERSION="${{ needs.setup.outputs.version_num }}"
           helm package chart/ --version "$VERSION" --app-version "$VERSION"
-          CHART_NAME=$(awk '/^name:/ {print $2; exit}' chart/Chart.yaml)
+          CHART_NAME=$(yq -r .name chart/Chart.yaml)
           CHART_TGZ="${CHART_NAME}-${VERSION}.tgz"
           ls -lh "$CHART_TGZ"
           echo "chart_tgz=$CHART_TGZ" >> "$GITHUB_OUTPUT"
+          echo "chart_name=$CHART_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Generate OCI config blob
+        run: |
+          # Build the config JSON helm expects: chart metadata from Chart.yaml.
+          # Media type must be application/vnd.cncf.helm.config.v1+json so
+          # `helm pull oci://...` recognises the artifact.
+          yq -o=json '{
+            "name": .name,
+            "version": "${{ needs.setup.outputs.version_num }}",
+            "description": .description,
+            "apiVersion": .apiVersion,
+            "type": .type,
+            "kubeVersion": .kubeVersion,
+            "keywords": .keywords,
+            "maintainers": .maintainers,
+            "home": .home,
+            "sources": .sources
+          }' chart/Chart.yaml > config.json
+          echo "Generated config.json:"
+          cat config.json
+
+      - name: Log in to GHCR for oras
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            oras login ${{ env.REGISTRY }} \
+              -u ${{ github.actor }} \
+              --password-stdin
 
       - name: Push chart to OCI registry
         run: |
-          helm push "${{ steps.package.outputs.chart_tgz }}" \
-            "oci://${{ env.CHART_OCI_REPO }}"
+          VERSION="${{ needs.setup.outputs.version_num }}"
+          CHART_TGZ="${{ steps.package.outputs.chart_tgz }}"
+          CHART_NAME="${{ steps.package.outputs.chart_name }}"
+
+          echo "Pushing ${CHART_TGZ} to oci://${CHART_OCI_REPO}:${VERSION}"
+
+          oras push ${{ env.CHART_OCI_REPO }}:${VERSION} \
+            --config config.json:application/vnd.cncf.helm.config.v1+json \
+            --annotation "org.opencontainers.image.title=${CHART_NAME}" \
+            --annotation "org.opencontainers.image.version=${VERSION}" \
+            --annotation "org.opencontainers.image.description=$(yq -r .description chart/Chart.yaml)" \
+            --annotation "org.opencontainers.image.url=$(yq -r .home chart/Chart.yaml)" \
+            --annotation "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            ${CHART_TGZ}:application/vnd.cncf.helm.chart.content.v1.tar+gzip
+
+      - name: Verify push
+        run: |
+          VERSION="${{ needs.setup.outputs.version_num }}"
+          echo "Verifying artifact at ${{ env.CHART_OCI_REPO }}:${VERSION}"
+          oras manifest fetch ${{ env.CHART_OCI_REPO }}:${VERSION} | jq .
 
       - name: Verify chart pull
         run: |
           VERSION="${{ needs.setup.outputs.version_num }}"
-          CHART_NAME=$(awk '/^name:/ {print $2; exit}' chart/Chart.yaml)
           mkdir -p /tmp/verify
-          helm pull "oci://${{ env.CHART_OCI_REPO }}/${CHART_NAME}" --version "$VERSION" --destination /tmp/verify
+          helm pull "oci://${{ env.CHART_OCI_REPO }}" --version "$VERSION" --destination /tmp/verify
           ls -lh /tmp/verify
 
   # release-assets: intentionally omitted for v1 — artifact-gateway has no

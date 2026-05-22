@@ -10,7 +10,7 @@ implementation plan at
 | Surface                         | Ship?       | Rationale |
 | ------------------------------- | ----------- | --------- |
 | Docker image (multi-stage)      | **Yes**     | Primary deployment artifact. Distroless, ~30 MB, embedded UI. Published to `ghcr.io/cnak-us/artifact-gateway`. |
-| Helm chart (OCI)                | **Yes**     | Kubernetes is the production target. Chart is published as an OCI artifact to `ghcr.io/cnak-us/charts/artifact-gateway` so it can be `helm install` and `helm pull oci://`. |
+| Helm chart (OCI)                | **Yes**     | Kubernetes is the production target. Chart is published as an OCI artifact to `ghcr.io/cnak-us/artifact-gateway/chart` so it can be `helm install` and `helm pull oci://`. |
 | Standalone Linux binary release | **No** (v1) | Service has hard runtime dependencies on Postgres and an externally terminated TLS cert. There is no scenario where a "just the binary" deploy is meaningfully easier than a one-pod K8s deploy or a 3-line `docker run`. Revisit only if a customer demonstrably needs an air-gapped, single-VM install. |
 
 ## Deployment modes

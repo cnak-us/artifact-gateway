@@ -3,7 +3,7 @@ name: artifact-gateway
 description: Kubernetes-native OCI auth gateway that proxies ghcr.io for license-gated customer access
 type: application
 version: 0.1.0
-appVersion: "0.0.3"
+appVersion: "0.0.7"
 kubeVersion: ">=1.24.0-0"
 keywords:
   - oci
