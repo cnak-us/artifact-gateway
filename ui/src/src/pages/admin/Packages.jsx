@@ -597,7 +597,9 @@ function ContainersSection({ packageId, loaded, rows, onChanged, onError, confir
             onAdd={async ({ alias, upstreamRepo, displayName }) => {
               try {
                 await admin.upsertPackageContainer(packageId, {
-                  alias, upstreamRepo, displayName,
+                  alias,
+                  upstream_repo: upstreamRepo,
+                  display_name: displayName,
                 });
                 onChanged();
                 return true;

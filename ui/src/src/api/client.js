@@ -90,7 +90,7 @@ export const admin = {
   probePackage: (id) => api.post(`/api/v1/packages/${id}/probe`, {}),
 
   // Multi-container packages — admin-side CRUD over package_containers rows.
-  // body for upsert: { alias, upstreamRepo, displayName }. Server stamps
+  // body for upsert: { alias, upstream_repo, display_name }. Server stamps
   // source='' for UI-created rows (distinct from manifest-managed rows).
   listPackageContainers: (packageId) => api.get(`/api/v1/packages/${packageId}/containers`),
   upsertPackageContainer: (packageId, body) =>
