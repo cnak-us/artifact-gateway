@@ -613,8 +613,8 @@ func createPackage(d AdminDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in packageDTO
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil ||
-			in.Slug == "" || in.Path == "" || in.UpstreamRepo == "" || in.Kind == "" {
-			writeJSONErr(w, http.StatusBadRequest, "slug, path, upstream_repo, kind required")
+			in.Slug == "" || in.Path == "" || in.Kind == "" {
+			writeJSONErr(w, http.StatusBadRequest, "slug, path, kind required")
 			return
 		}
 		if in.UpstreamCredentialID == uuid.Nil {

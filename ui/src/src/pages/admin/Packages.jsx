@@ -342,20 +342,12 @@ function PackageModal({ open, onClose, initial, creds, onSaved }) {
         body.github_repo = body.github_repo.trim();
         body.release_pattern = (body.release_pattern || 'latest').trim();
         body.asset_pattern = (body.asset_pattern || '*').trim();
-        // The server's required-field check on upstream_repo also fires for
-        // release sources — mirror github_repo so a release package isn't
-        // rejected for a field the release path doesn't actually use.
-        if (!body.upstream_repo) body.upstream_repo = body.github_repo;
       } else {
         body.source = 'oci';
         // Strip release-only fields so we don't send noise to the OCI path.
         delete body.github_repo;
         delete body.release_pattern;
         delete body.asset_pattern;
-        // Multi-container packages keep upstream_repo as a hint at most. We
-        // send whatever the user has (possibly empty) — container rows are
-        // what actually serve traffic.
-        if (isMulti && !body.upstream_repo) body.upstream_repo = '';
       }
       if (form.id) {
         await admin.updatePackage(form.id, body);
@@ -510,7 +502,7 @@ function PackageModal({ open, onClose, initial, creds, onSaved }) {
           <Textarea label="Description" value={form.description} onChange={set('description')} rows={2} />
         </div>
         <div className="col-span-2">
-          <Input label="Release notes URL" value={form.release_notes_url} onChange={set('release_notes_url')} placeholder="https://…" />
+          <Input label="Documentation URL" value={form.release_notes_url} onChange={set('release_notes_url')} placeholder="https://…" hint="Shown as 'View documentation' on the catalog page." />
         </div>
         <div className="col-span-2">
           <Textarea

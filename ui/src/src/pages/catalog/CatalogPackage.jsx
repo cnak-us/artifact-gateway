@@ -131,6 +131,16 @@ export default function CatalogPackage() {
           <p className="mt-2 text-xs font-mono text-g-text-disabled">
             {hostname}/{pkg.path}
           </p>
+          {pkg.release_notes_url && (
+            <a
+              href={pkg.release_notes_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-3 inline-flex items-center gap-1 text-sm text-g-text-link hover:underline"
+            >
+              View documentation <MdOpenInNew className="text-base" />
+            </a>
+          )}
         </div>
       </header>
 
@@ -160,20 +170,6 @@ export default function CatalogPackage() {
           needsRealToken={needsRealToken}
           slug={slug}
         />
-      )}
-
-      {pkg.release_notes_url && (
-        <section className="mb-10">
-          <h2 className="text-lg font-semibold mb-3">Release notes</h2>
-          <a
-            href={pkg.release_notes_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-sm text-g-text-link hover:underline"
-          >
-            View release notes <MdOpenInNew className="text-base" />
-          </a>
-        </section>
       )}
 
       {pkg.install_instructions_md && (
