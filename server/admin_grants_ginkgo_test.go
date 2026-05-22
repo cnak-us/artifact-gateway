@@ -175,8 +175,14 @@ func (*grantsFakeStore) DeleteRootKey(context.Context, uuid.UUID) error      { p
 func (*grantsFakeStore) ListContactsForLicense(context.Context, uuid.UUID) ([]store.LicenseContact, error) {
 	panic("unused")
 }
+func (*grantsFakeStore) ListManifestContactsForLicense(context.Context, uuid.UUID) ([]store.LicenseContact, error) {
+	panic("unused")
+}
 func (*grantsFakeStore) AddContact(context.Context, *store.LicenseContact) error { panic("unused") }
 func (*grantsFakeStore) RemoveContact(context.Context, uuid.UUID, string) error  { panic("unused") }
+func (*grantsFakeStore) ReplaceManifestContactsForLicense(context.Context, uuid.UUID, []store.LicenseContact) error {
+	panic("unused")
+}
 func (*grantsFakeStore) FindLicensesByContactEmail(context.Context, string) ([]store.License, error) {
 	panic("unused")
 }

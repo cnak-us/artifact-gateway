@@ -2,7 +2,7 @@ package apply_test
 
 import (
 	"context"
-	"strings"
+	"fmt"
 	"sync"
 	"time"
 
@@ -14,8 +14,15 @@ import (
 // fakeStore is a minimal in-memory DataStore for apply tests. Only the
 // methods the reconciler exercises are implemented; the rest panic so an
 // accidental dependency on real DB behavior shows up loud.
+//
+// enforceFK toggles a foreign-key check on DeleteUpstreamCredential: with FK
+// on, attempting to delete a credential while any package still references it
+// returns an error (mirrors `ON DELETE RESTRICT` in pg). Tests opt in to this
+// to verify prune ordering.
 type fakeStore struct {
 	mu sync.Mutex
+
+	enforceFK bool
 
 	upstreamByID map[uuid.UUID]*store.UpstreamCredential
 	upstreamList []*store.UpstreamCredential // preserves insertion order
@@ -26,12 +33,6 @@ type fakeStore struct {
 	licensesByID    map[uuid.UUID]*store.License
 	licensesList    []*store.License
 	grantsByLicense map[uuid.UUID][]store.PackageGrant
-
-	oidcByID map[uuid.UUID]*store.OIDCProvider
-	oidcList []*store.OIDCProvider
-
-	staticByID    map[uuid.UUID]*store.StaticAdmin
-	staticByEmail map[string]*store.StaticAdmin
 }
 
 func newFakeStore() *fakeStore {
@@ -40,9 +41,6 @@ func newFakeStore() *fakeStore {
 		packagesByID:    map[uuid.UUID]*store.Package{},
 		licensesByID:    map[uuid.UUID]*store.License{},
 		grantsByLicense: map[uuid.UUID][]store.PackageGrant{},
-		oidcByID:        map[uuid.UUID]*store.OIDCProvider{},
-		staticByID:      map[uuid.UUID]*store.StaticAdmin{},
-		staticByEmail:   map[string]*store.StaticAdmin{},
 	}
 }
 
@@ -79,6 +77,13 @@ func (s *fakeStore) DeleteUpstreamCredential(_ context.Context, id uuid.UUID) er
 	defer s.mu.Unlock()
 	if _, ok := s.upstreamByID[id]; !ok {
 		return store.ErrNotFound
+	}
+	if s.enforceFK {
+		for _, p := range s.packagesList {
+			if p.UpstreamCredentialID == id {
+				return fmt.Errorf("fk violation: package %s still references credential", p.Slug)
+			}
+		}
 	}
 	delete(s.upstreamByID, id)
 	out := s.upstreamList[:0]
@@ -211,6 +216,10 @@ func (s *fakeStore) ListGrantsForLicense(_ context.Context, lic uuid.UUID) ([]st
 func (s *fakeStore) ReplaceGrantsForLicense(_ context.Context, lic uuid.UUID, pkgIDs []uuid.UUID, actions []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(pkgIDs) == 0 {
+		delete(s.grantsByLicense, lic)
+		return nil
+	}
 	if len(actions) == 0 {
 		actions = []string{"pull"}
 	}
@@ -219,106 +228,6 @@ func (s *fakeStore) ReplaceGrantsForLicense(_ context.Context, lic uuid.UUID, pk
 		rows = append(rows, store.PackageGrant{LicenseID: lic, PackageID: p, Actions: append([]string(nil), actions...)})
 	}
 	s.grantsByLicense[lic] = rows
-	return nil
-}
-
-// --- oidc providers ---------------------------------------------------------
-
-func (s *fakeStore) ListOIDCProviders(context.Context) ([]store.OIDCProvider, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]store.OIDCProvider, 0, len(s.oidcList))
-	for _, p := range s.oidcList {
-		out = append(out, *p)
-	}
-	return out, nil
-}
-
-func (s *fakeStore) InsertOIDCProvider(_ context.Context, o *store.OIDCProvider) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if o.ID == uuid.Nil {
-		o.ID = uuid.New()
-	}
-	o.CreatedAt = time.Now()
-	o.UpdatedAt = time.Now()
-	cp := *o
-	s.oidcByID[o.ID] = &cp
-	s.oidcList = append(s.oidcList, &cp)
-	return nil
-}
-
-func (s *fakeStore) DeleteOIDCProvider(_ context.Context, id uuid.UUID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.oidcByID[id]; !ok {
-		return store.ErrNotFound
-	}
-	delete(s.oidcByID, id)
-	out := s.oidcList[:0]
-	for _, p := range s.oidcList {
-		if p.ID != id {
-			out = append(out, p)
-		}
-	}
-	s.oidcList = out
-	return nil
-}
-
-// --- static admins ---------------------------------------------------------
-
-func (s *fakeStore) ListStaticAdmins(context.Context) ([]store.StaticAdmin, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]store.StaticAdmin, 0, len(s.staticByID))
-	for _, sa := range s.staticByID {
-		out = append(out, *sa)
-	}
-	return out, nil
-}
-
-func (s *fakeStore) GetStaticAdminByEmail(_ context.Context, email string) (*store.StaticAdmin, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sa, ok := s.staticByEmail[strings.ToLower(email)]
-	if !ok {
-		return nil, store.ErrNotFound
-	}
-	cp := *sa
-	return &cp, nil
-}
-
-func (s *fakeStore) UpsertStaticAdmin(_ context.Context, sa *store.StaticAdmin) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	emailLower := strings.ToLower(sa.Email)
-	if existing, ok := s.staticByEmail[emailLower]; ok {
-		// Update in place.
-		existing.PasswordHash = sa.PasswordHash
-		existing.Source = sa.Source
-		existing.UpdatedAt = time.Now()
-		return nil
-	}
-	if sa.ID == uuid.Nil {
-		sa.ID = uuid.New()
-	}
-	sa.CreatedAt = time.Now()
-	sa.UpdatedAt = time.Now()
-	cp := *sa
-	s.staticByID[sa.ID] = &cp
-	s.staticByEmail[emailLower] = &cp
-	return nil
-}
-
-func (s *fakeStore) DeleteStaticAdmin(_ context.Context, id uuid.UUID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sa, ok := s.staticByID[id]
-	if !ok {
-		return store.ErrNotFound
-	}
-	delete(s.staticByID, id)
-	delete(s.staticByEmail, strings.ToLower(sa.Email))
 	return nil
 }
 
@@ -333,12 +242,17 @@ func (*fakeStore) UpdateUser(context.Context, *store.User) error   { panic("unus
 func (*fakeStore) ListUsers(context.Context) ([]store.User, error) { panic("unused") }
 func (*fakeStore) CountUsers(context.Context) (int, error)         { panic("unused") }
 
+func (*fakeStore) ListOIDCProviders(context.Context) ([]store.OIDCProvider, error) {
+	panic("unused")
+}
 func (*fakeStore) GetOIDCProvider(context.Context, uuid.UUID) (*store.OIDCProvider, error) {
 	panic("unused")
 }
 func (*fakeStore) GetOIDCProviderByName(context.Context, string) (*store.OIDCProvider, error) {
 	panic("unused")
 }
+func (*fakeStore) InsertOIDCProvider(context.Context, *store.OIDCProvider) error { panic("unused") }
+func (*fakeStore) DeleteOIDCProvider(context.Context, uuid.UUID) error           { panic("unused") }
 
 func (*fakeStore) GetUpstreamCredential(context.Context, uuid.UUID) (*store.UpstreamCredential, error) {
 	panic("unused")
@@ -376,8 +290,14 @@ func (*fakeStore) CountActiveCustomerTokens(context.Context) (int, error)       
 func (*fakeStore) ListContactsForLicense(context.Context, uuid.UUID) ([]store.LicenseContact, error) {
 	panic("unused")
 }
+func (*fakeStore) ListManifestContactsForLicense(context.Context, uuid.UUID) ([]store.LicenseContact, error) {
+	return nil, nil
+}
 func (*fakeStore) AddContact(context.Context, *store.LicenseContact) error { panic("unused") }
 func (*fakeStore) RemoveContact(context.Context, uuid.UUID, string) error  { panic("unused") }
+func (*fakeStore) ReplaceManifestContactsForLicense(context.Context, uuid.UUID, []store.LicenseContact) error {
+	return nil
+}
 func (*fakeStore) FindLicensesByContactEmail(context.Context, string) ([]store.License, error) {
 	panic("unused")
 }
@@ -398,6 +318,15 @@ func (*fakeStore) GetActiveSigningKey(context.Context) (*store.RootKey, error) {
 func (*fakeStore) InsertRootKey(context.Context, *store.RootKey) error         { panic("unused") }
 func (*fakeStore) SetActiveRootKey(context.Context, uuid.UUID) error           { panic("unused") }
 func (*fakeStore) DeleteRootKey(context.Context, uuid.UUID) error              { panic("unused") }
+
+func (*fakeStore) ListStaticAdmins(context.Context) ([]store.StaticAdmin, error) {
+	panic("unused")
+}
+func (*fakeStore) GetStaticAdminByEmail(context.Context, string) (*store.StaticAdmin, error) {
+	panic("unused")
+}
+func (*fakeStore) UpsertStaticAdmin(context.Context, *store.StaticAdmin) error { panic("unused") }
+func (*fakeStore) DeleteStaticAdmin(context.Context, uuid.UUID) error          { panic("unused") }
 
 func (*fakeStore) InsertAuditEvent(audit.AuditEvent) error { return nil }
 func (*fakeStore) ListAuditEvents(context.Context, int, *time.Time) ([]audit.AuditEvent, error) {

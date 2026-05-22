@@ -102,17 +102,6 @@ func mustJSONString(s string) json.RawMessage {
 	return b
 }
 
-func writeProbeNetErr(w http.ResponseWriter, method, url string, err error, start time.Time) {
-	writeJSON(w, http.StatusOK, probeResult{
-		OK:         false,
-		URL:        url,
-		Method:     method,
-		Status:     0,
-		DurationMS: time.Since(start).Milliseconds(),
-		Summary:    "network error: " + err.Error(),
-	})
-}
-
 func newProbeClient() *http.Client {
 	return &http.Client{Timeout: probeTimeout}
 }

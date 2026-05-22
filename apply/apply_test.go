@@ -10,6 +10,8 @@ import (
 	"github.com/cnak-us/artifact-gateway/apply"
 	"github.com/cnak-us/artifact-gateway/auth"
 	"github.com/cnak-us/artifact-gateway/license"
+	"github.com/cnak-us/artifact-gateway/store"
+	"github.com/google/uuid"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -92,26 +94,16 @@ spec: {}`
 
 var _ = Describe("Resolve", func() {
 	It("drains *FromEnv references into plaintext fields", func() {
-		GinkgoT().Setenv("TEST_PW", "supersecret")
-		GinkgoT().Setenv("TEST_CLIENT_SECRET", "client-secret-value")
 		GinkgoT().Setenv("TEST_PAT", "ghp_abc")
 		mf := &apply.Manifest{
 			APIVersion: apply.APIVersion, Kind: apply.Kind,
 			Spec: apply.ManifestSpec{
-				StaticAdmins: []apply.StaticAdminSpec{
-					{Email: "ops@x", PasswordFromEnv: "TEST_PW"},
-				},
-				OIDCProviders: []apply.OIDCProviderSpec{
-					{Name: "dex", ClientSecretFromEnv: "TEST_CLIENT_SECRET"},
-				},
 				UpstreamCredentials: []apply.UpstreamCredentialSpec{
 					{Name: "ghcr", PATFromEnv: "TEST_PAT"},
 				},
 			},
 		}
 		Expect(apply.Resolve(mf)).To(Succeed())
-		Expect(mf.Spec.StaticAdmins[0].Password).To(Equal("supersecret"))
-		Expect(mf.Spec.OIDCProviders[0].ClientSecret).To(Equal("client-secret-value"))
 		Expect(mf.Spec.UpstreamCredentials[0].PAT).To(Equal("ghp_abc"))
 	})
 
@@ -119,9 +111,9 @@ var _ = Describe("Resolve", func() {
 		mf := &apply.Manifest{
 			APIVersion: apply.APIVersion, Kind: apply.Kind,
 			Spec: apply.ManifestSpec{
-				StaticAdmins: []apply.StaticAdminSpec{
-					{Email: "a@x", PasswordFromEnv: "MISSING_A"},
-					{Email: "b@x", PasswordFromEnv: "MISSING_B"},
+				UpstreamCredentials: []apply.UpstreamCredentialSpec{
+					{Name: "a", PATFromEnv: "MISSING_A"},
+					{Name: "b", PATFromEnv: "MISSING_B"},
 				},
 			},
 		}
@@ -151,7 +143,7 @@ var _ = Describe("Reconcile", func() {
 		verif = &fakeVerifier{}
 	})
 
-	It("creates upstream credentials, packages, licenses, grants, and providers from scratch", func() {
+	It("creates upstream credentials, packages, licenses, and grants from scratch", func() {
 		mf := &apply.Manifest{
 			APIVersion: apply.APIVersion, Kind: apply.Kind,
 			Spec: apply.ManifestSpec{
@@ -172,16 +164,6 @@ var _ = Describe("Reconcile", func() {
 				Grants: []apply.GrantSpec{
 					{License: "lic_1", Packages: []string{"core"}},
 				},
-				OIDCProviders: []apply.OIDCProviderSpec{
-					{
-						Name: "dex", IssuerURL: "https://dex.example.com",
-						ClientID: "ag", ClientSecret: "shh",
-						Scopes: []string{"openid", "email"}, Enabled: true,
-					},
-				},
-				StaticAdmins: []apply.StaticAdminSpec{
-					{Email: "ops@example.com", Password: "p"},
-				},
 			},
 		}
 		rep, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
@@ -193,8 +175,6 @@ var _ = Describe("Reconcile", func() {
 		Expect(actions["package/core"]).To(Equal("create"))
 		Expect(actions["license/lic_1"]).To(Equal("create"))
 		Expect(actions["grant/lic_1"]).To(Equal("create"))
-		Expect(actions["oidc-provider/dex"]).To(Equal("create"))
-		Expect(actions["static-admin/ops@example.com"]).To(Equal("create"))
 	})
 
 	It("is idempotent: a second apply is all-noop", func() {
@@ -234,33 +214,6 @@ var _ = Describe("Reconcile", func() {
 		// And the DB still shows the old value — dry-run wrote nothing.
 		pkgs, _ := st.ListPackages(ctx)
 		Expect(pkgs[0].DisplayName).To(Equal("Core"))
-	})
-
-	It("prunes manifest-managed static admins when Prune=true", func() {
-		// Seed two admins.
-		mf := &apply.Manifest{
-			APIVersion: apply.APIVersion, Kind: apply.Kind,
-			Spec: apply.ManifestSpec{
-				StaticAdmins: []apply.StaticAdminSpec{
-					{Email: "keep@x", Password: "k"},
-					{Email: "drop@x", Password: "d"},
-				},
-			},
-		}
-		_, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
-		Expect(err).ToNot(HaveOccurred())
-
-		// Drop one from the manifest; re-apply with Prune.
-		mf.Spec.StaticAdmins = mf.Spec.StaticAdmins[:1]
-		rep, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{Prune: true})
-		Expect(err).ToNot(HaveOccurred())
-
-		actions := actionsByKey(rep)
-		Expect(actions["static-admin/drop@x"]).To(Equal("delete"))
-
-		got, _ := st.ListStaticAdmins(ctx)
-		Expect(got).To(HaveLen(1))
-		Expect(strings.ToLower(got[0].Email)).To(Equal("keep@x"))
 	})
 
 	It("rejects a package whose upstreamCredential is unknown", func() {
@@ -314,27 +267,186 @@ var _ = Describe("Reconcile", func() {
 		Expect(rep.Errors[0].Message).To(ContainSubstring("invalid"))
 	})
 
-	It("updates an oidc provider's client_secret when changed", func() {
-		mf := minimalManifest()
-		_, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
-		Expect(err).ToNot(HaveOccurred())
+	// --- prune correctness ---------------------------------------------------
 
-		mf.Spec.OIDCProviders[0].ClientSecret = "rotated"
-		rep, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
-		Expect(err).ToNot(HaveOccurred())
-
-		actions := actionsByKey(rep)
-		Expect(actions["oidc-provider/dex"]).To(Equal("update"))
-		var item *apply.ApplyItem
-		for i := range rep.Items {
-			if rep.Items[i].Kind == apply.KindOIDCProvider {
-				item = &rep.Items[i]
+	Describe("Prune", func() {
+		It("deletes upstream credentials tagged source='manifest' that vanish from the manifest", func() {
+			mf := &apply.Manifest{
+				APIVersion: apply.APIVersion, Kind: apply.Kind,
+				Spec: apply.ManifestSpec{
+					UpstreamCredentials: []apply.UpstreamCredentialSpec{
+						{Name: "keep", Kind: "ghcr", Username: "bot", PAT: "k"},
+						{Name: "drop", Kind: "ghcr", Username: "bot", PAT: "d"},
+					},
+				},
 			}
-		}
-		Expect(item).ToNot(BeNil())
-		Expect(item.Diff).To(ContainElement("client_secret"))
+			_, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
+			Expect(err).ToNot(HaveOccurred())
+
+			// Drop one cred, re-apply with Prune.
+			mf.Spec.UpstreamCredentials = mf.Spec.UpstreamCredentials[:1]
+			rep, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{Prune: true})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(actionsByKey(rep)["upstream-credential/drop"]).To(Equal("delete"))
+
+			got, _ := st.ListUpstreamCredentials(ctx)
+			Expect(got).To(HaveLen(1))
+			Expect(got[0].Name).To(Equal("keep"))
+		})
+
+		It("LEAVES admin-UI-created credentials (source='') alone when pruning", func() {
+			// Seed an admin-UI-created row directly into the store.
+			Expect(st.InsertUpstreamCredential(ctx, &store.UpstreamCredential{
+				ID: uuid.New(), Name: "admin-cred", Kind: "ghcr",
+				Username: "user", PATFingerprint: "fp", Source: "", // legacy / admin-UI tag
+			})).To(Succeed())
+
+			// Apply a manifest that doesn't mention "admin-cred", with prune on.
+			mf := &apply.Manifest{
+				APIVersion: apply.APIVersion, Kind: apply.Kind,
+				Spec: apply.ManifestSpec{
+					UpstreamCredentials: []apply.UpstreamCredentialSpec{
+						{Name: "mani", Kind: "ghcr", Username: "bot", PAT: "tok"},
+					},
+				},
+			}
+			_, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{Prune: true})
+			Expect(err).ToNot(HaveOccurred())
+
+			got, _ := st.ListUpstreamCredentials(ctx)
+			names := make([]string, 0, len(got))
+			for _, c := range got {
+				names = append(names, c.Name)
+			}
+			Expect(names).To(ConsistOf("admin-cred", "mani"))
+		})
+
+		It("LEAVES admin-UI-created packages (managed_by='') alone when pruning", func() {
+			// Seed a cred so the admin package can FK to something.
+			credID := uuid.New()
+			Expect(st.InsertUpstreamCredential(ctx, &store.UpstreamCredential{
+				ID: credID, Name: "shared-cred", Kind: "ghcr", Username: "u", Source: "",
+			})).To(Succeed())
+			Expect(st.InsertPackage(ctx, &store.Package{
+				ID: uuid.New(), Slug: "admin-pkg", Path: "p/admin", UpstreamRepo: "p/admin",
+				UpstreamCredentialID: credID, Kind: "container", Source: "oci",
+				ManagedBy: "", // admin-UI
+			})).To(Succeed())
+
+			mf := &apply.Manifest{
+				APIVersion: apply.APIVersion, Kind: apply.Kind,
+				Spec: apply.ManifestSpec{
+					UpstreamCredentials: []apply.UpstreamCredentialSpec{
+						{Name: "shared-cred", Kind: "ghcr", Username: "u", PAT: "t"},
+					},
+				},
+			}
+			_, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{Prune: true})
+			Expect(err).ToNot(HaveOccurred())
+
+			got, _ := st.ListPackages(ctx)
+			Expect(got).To(HaveLen(1))
+			Expect(got[0].Slug).To(Equal("admin-pkg"))
+		})
+
+		It("LEAVES admin-UI-created licenses (source='') alone when pruning", func() {
+			Expect(st.InsertLicense(ctx, &store.License{
+				ID: uuid.New(), LicenseID: "lic_admin", Customer: "Admin", LicBlob: "blob", Source: "",
+			})).To(Succeed())
+
+			mf := &apply.Manifest{
+				APIVersion: apply.APIVersion, Kind: apply.Kind,
+				Spec: apply.ManifestSpec{
+					Licenses: []apply.LicenseSpec{
+						{LicBlob: "lic_manifest|Mani"},
+					},
+				},
+			}
+			_, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{Prune: true})
+			Expect(err).ToNot(HaveOccurred())
+
+			got, _ := st.ListLicenses(ctx)
+			ids := make([]string, 0, len(got))
+			for _, l := range got {
+				ids = append(ids, l.LicenseID)
+			}
+			Expect(ids).To(ConsistOf("lic_admin", "lic_manifest"))
+		})
+
+		It("removes both a credential and its packages from the manifest with Prune=true (FK order)", func() {
+			// Seed via the reconciler so both rows are tagged manifest-managed.
+			mf := &apply.Manifest{
+				APIVersion: apply.APIVersion, Kind: apply.Kind,
+				Spec: apply.ManifestSpec{
+					UpstreamCredentials: []apply.UpstreamCredentialSpec{
+						{Name: "uc1", Kind: "ghcr", Username: "u", PAT: "t"},
+					},
+					Packages: []apply.PackageSpec{
+						{
+							Slug: "pkg1", Source: "oci",
+							Path: "ns/p1", UpstreamRepo: "ns/p1",
+							UpstreamCredential: "uc1", Kind: "container",
+						},
+					},
+				},
+			}
+			_, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
+			Expect(err).ToNot(HaveOccurred())
+
+			// Drop both. fakeStore enforces the FK so the prune ordering must
+			// delete the package before the credential.
+			st.enforceFK = true
+			empty := &apply.Manifest{APIVersion: apply.APIVersion, Kind: apply.Kind}
+			rep, err := apply.Reconcile(ctx, st, crypto, verif, empty, apply.Options{Prune: true})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(rep.Errors).To(BeEmpty(), "FK ordering should not produce errors; got %+v", rep.Errors)
+
+			gotPkgs, _ := st.ListPackages(ctx)
+			gotCreds, _ := st.ListUpstreamCredentials(ctx)
+			Expect(gotPkgs).To(BeEmpty())
+			Expect(gotCreds).To(BeEmpty())
+		})
+
+		It("clears existing grants when a license is kept but its grants[] is emptied", func() {
+			mf := &apply.Manifest{
+				APIVersion: apply.APIVersion, Kind: apply.Kind,
+				Spec: apply.ManifestSpec{
+					UpstreamCredentials: []apply.UpstreamCredentialSpec{
+						{Name: "ghcr", Kind: "ghcr", Username: "u", PAT: "t"},
+					},
+					Packages: []apply.PackageSpec{
+						{Slug: "core", Source: "oci", Path: "n/c", UpstreamRepo: "n/c", UpstreamCredential: "ghcr", Kind: "container"},
+					},
+					Licenses: []apply.LicenseSpec{{LicBlob: "lic_1|Acme|enterprise|2030"}},
+					Grants:   []apply.GrantSpec{{License: "lic_1", Packages: []string{"core"}}},
+				},
+			}
+			_, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{})
+			Expect(err).ToNot(HaveOccurred())
+
+			// Drop the grant entry but keep the license.
+			mf.Spec.Grants = nil
+			rep, err := apply.Reconcile(ctx, st, crypto, verif, mf, apply.Options{Prune: true})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(actionsByKey(rep)["grant/lic_1"]).To(Equal("delete"))
+
+			lic := findLicense(ctx, st, "lic_1")
+			Expect(lic).ToNot(BeNil())
+			grants, _ := st.ListGrantsForLicense(ctx, lic.ID)
+			Expect(grants).To(BeEmpty())
+		})
 	})
 })
+
+func findLicense(ctx context.Context, st *fakeStore, licID string) *store.License {
+	all, _ := st.ListLicenses(ctx)
+	for i := range all {
+		if all[i].LicenseID == licID {
+			return &all[i]
+		}
+	}
+	return nil
+}
 
 func minimalManifest() *apply.Manifest {
 	return &apply.Manifest{
@@ -349,13 +461,6 @@ func minimalManifest() *apply.Manifest {
 					Path: "ns/core", UpstreamRepo: "ns/core",
 					UpstreamCredential: "ghcr", Kind: "container",
 					DisplayName: "Core",
-				},
-			},
-			OIDCProviders: []apply.OIDCProviderSpec{
-				{
-					Name: "dex", IssuerURL: "https://dex.example.com",
-					ClientID: "ag", ClientSecret: "shh",
-					Scopes: []string{"openid"}, Enabled: true,
 				},
 			},
 		},

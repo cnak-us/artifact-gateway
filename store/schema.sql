@@ -46,9 +46,17 @@ CREATE TABLE IF NOT EXISTS upstream_credentials (
     issuer_secret_enc        BYTEA,
     issuer_config            JSONB NOT NULL DEFAULT '{}'::jsonb,
     last_used_at             TIMESTAMPTZ NULL,
+    -- source tags the row owner: '' (legacy / admin-UI-created) or 'manifest'
+    -- (reconciler-owned). Prune passes only delete 'manifest' rows so an
+    -- admin's break-glass credential isn't wiped by an unrelated apply.
+    source                   TEXT NOT NULL DEFAULT '',
     created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at               TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Idempotent upgrade for pre-source DBs.
+ALTER TABLE upstream_credentials
+    ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS packages (
     id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -68,12 +76,20 @@ CREATE TABLE IF NOT EXISTS packages (
     github_repo              TEXT NOT NULL DEFAULT '',
     release_pattern          TEXT NOT NULL DEFAULT '',
     asset_pattern            TEXT NOT NULL DEFAULT '',
+    -- managed_by tags the row owner: '' (legacy / admin-UI-created) or 'manifest'
+    -- (reconciler-owned). Named distinctly from the pre-existing `source` column
+    -- (which discriminates oci/github-release/gitlab-release) to avoid overload.
+    managed_by               TEXT NOT NULL DEFAULT '',
     created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at               TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS packages_slug_idx ON packages (slug);
 CREATE INDEX IF NOT EXISTS packages_path_idx ON packages (path);
+
+-- Idempotent upgrade for pre-managed_by DBs.
+ALTER TABLE packages
+    ADD COLUMN IF NOT EXISTS managed_by TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS licenses (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -84,6 +100,9 @@ CREATE TABLE IF NOT EXISTS licenses (
     expires_at    TIMESTAMPTZ NULL,
     lic_blob      TEXT NOT NULL,
     revoked_at    TIMESTAMPTZ NULL,
+    -- source tags the row owner: '' (legacy / admin-UI-created) or 'manifest'
+    -- (reconciler-owned). Prune passes only delete 'manifest' rows.
+    source        TEXT NOT NULL DEFAULT '',
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -91,6 +110,10 @@ CREATE TABLE IF NOT EXISTS licenses (
 CREATE INDEX IF NOT EXISTS licenses_active_expires_idx
     ON licenses (expires_at)
     WHERE revoked_at IS NULL;
+
+-- Idempotent upgrade for pre-source DBs.
+ALTER TABLE licenses
+    ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS customer_tokens (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -167,12 +190,21 @@ CREATE TABLE IF NOT EXISTS license_contacts (
     license_id  UUID NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
     email       CITEXT NOT NULL,
     name        TEXT NOT NULL DEFAULT '',
+    -- source tags the row owner: '' (legacy / admin-UI-created) or 'manifest'
+    -- (reconciler-owned). Prune passes only delete 'manifest' rows.
+    source      TEXT NOT NULL DEFAULT '',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (license_id, email)
 );
 
 CREATE INDEX IF NOT EXISTS license_contacts_email_idx ON license_contacts (email);
+
+-- Idempotent upgrade for pre-source DBs.
+ALTER TABLE license_contacts
+    ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '';
+
+CREATE INDEX IF NOT EXISTS license_contacts_source_idx ON license_contacts (source);
 
 -- branding is a singleton (id=1). Empty/NULL fields fall through to the
 -- compiled-in CNAK preset in the UI loader.

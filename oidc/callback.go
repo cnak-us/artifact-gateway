@@ -196,9 +196,6 @@ func (h *HandlerDeps) StartAuto(w http.ResponseWriter, r *http.Request, provider
 	h.startFlow(w, r, providerName, "auto")
 }
 
-// validFlows is the whitelist of accepted flow values for startFlow.
-var validFlows = map[string]bool{"": true, "customer": true, "auto": true}
-
 func (h *HandlerDeps) startFlow(w http.ResponseWriter, r *http.Request, providerName, flow string) {
 	p, err := h.Registry.Lookup(providerName)
 	if err != nil {

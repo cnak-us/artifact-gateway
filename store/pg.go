@@ -238,7 +238,7 @@ func (p *PG) DeleteOIDCProvider(ctx context.Context, id uuid.UUID) error {
 
 // ---------- upstream credentials ----------
 
-const upstreamCols = `id, name, kind, username, pat_enc, pat_fingerprint, base_url, ca_bundle_pem, insecure_skip_tls_verify, issuer_kind, issuer_secret_enc, issuer_config, last_used_at, created_at, updated_at`
+const upstreamCols = `id, name, kind, username, pat_enc, pat_fingerprint, base_url, ca_bundle_pem, insecure_skip_tls_verify, issuer_kind, issuer_secret_enc, issuer_config, last_used_at, source, created_at, updated_at`
 
 func scanUpstream(row pgx.Row) (*UpstreamCredential, error) {
 	var c UpstreamCredential
@@ -246,7 +246,7 @@ func scanUpstream(row pgx.Row) (*UpstreamCredential, error) {
 		&c.ID, &c.Name, &c.Kind, &c.Username, &c.PATEnc,
 		&c.PATFingerprint, &c.BaseURL, &c.CABundlePEM, &c.InsecureSkipTLSVerify,
 		&c.IssuerKind, &c.IssuerSecretEnc, &c.IssuerConfigJSON,
-		&c.LastUsedAt, &c.CreatedAt, &c.UpdatedAt,
+		&c.LastUsedAt, &c.Source, &c.CreatedAt, &c.UpdatedAt,
 	)
 	if err != nil {
 		return nil, mapErr(err)
@@ -267,7 +267,7 @@ func (p *PG) ListUpstreamCredentials(ctx context.Context) ([]UpstreamCredential,
 			&c.ID, &c.Name, &c.Kind, &c.Username, &c.PATEnc,
 			&c.PATFingerprint, &c.BaseURL, &c.CABundlePEM, &c.InsecureSkipTLSVerify,
 			&c.IssuerKind, &c.IssuerSecretEnc, &c.IssuerConfigJSON,
-			&c.LastUsedAt, &c.CreatedAt, &c.UpdatedAt,
+			&c.LastUsedAt, &c.Source, &c.CreatedAt, &c.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -295,12 +295,12 @@ func (p *PG) InsertUpstreamCredential(ctx context.Context, c *UpstreamCredential
 		cfg = []byte(`{}`)
 	}
 	_, err := p.pool.Exec(ctx,
-		`INSERT INTO upstream_credentials (id, name, kind, username, pat_enc, pat_fingerprint, base_url, ca_bundle_pem, insecure_skip_tls_verify, issuer_kind, issuer_secret_enc, issuer_config, last_used_at, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		`INSERT INTO upstream_credentials (id, name, kind, username, pat_enc, pat_fingerprint, base_url, ca_bundle_pem, insecure_skip_tls_verify, issuer_kind, issuer_secret_enc, issuer_config, last_used_at, source, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 		c.ID, c.Name, c.Kind, c.Username, c.PATEnc, c.PATFingerprint,
 		c.BaseURL, c.CABundlePEM, c.InsecureSkipTLSVerify,
 		c.IssuerKind, c.IssuerSecretEnc, cfg,
-		c.LastUsedAt, c.CreatedAt, c.UpdatedAt,
+		c.LastUsedAt, c.Source, c.CreatedAt, c.UpdatedAt,
 	)
 	return err
 }
@@ -331,7 +331,7 @@ func (p *PG) TouchUpstreamCredential(ctx context.Context, id uuid.UUID) error {
 
 // ---------- packages ----------
 
-const packageCols = `id, slug, path, upstream_repo, upstream_credential_id, kind, display_name, description, release_notes_url, install_instructions_md, source, github_repo, release_pattern, asset_pattern, created_at, updated_at`
+const packageCols = `id, slug, path, upstream_repo, upstream_credential_id, kind, display_name, description, release_notes_url, install_instructions_md, source, github_repo, release_pattern, asset_pattern, managed_by, created_at, updated_at`
 
 func scanPackage(row pgx.Row) (*Package, error) {
 	var pk Package
@@ -339,7 +339,7 @@ func scanPackage(row pgx.Row) (*Package, error) {
 		&pk.ID, &pk.Slug, &pk.Path, &pk.UpstreamRepo, &pk.UpstreamCredentialID,
 		&pk.Kind, &pk.DisplayName, &pk.Description, &pk.ReleaseNotesURL,
 		&pk.InstallInstructionsMD, &pk.Source, &pk.GitHubRepo, &pk.ReleasePattern,
-		&pk.AssetPattern, &pk.CreatedAt, &pk.UpdatedAt,
+		&pk.AssetPattern, &pk.ManagedBy, &pk.CreatedAt, &pk.UpdatedAt,
 	)
 	if err != nil {
 		return nil, mapErr(err)
@@ -360,7 +360,7 @@ func (p *PG) ListPackages(ctx context.Context) ([]Package, error) {
 			&pk.ID, &pk.Slug, &pk.Path, &pk.UpstreamRepo, &pk.UpstreamCredentialID,
 			&pk.Kind, &pk.DisplayName, &pk.Description, &pk.ReleaseNotesURL,
 			&pk.InstallInstructionsMD, &pk.Source, &pk.GitHubRepo, &pk.ReleasePattern,
-			&pk.AssetPattern, &pk.CreatedAt, &pk.UpdatedAt,
+			&pk.AssetPattern, &pk.ManagedBy, &pk.CreatedAt, &pk.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -397,12 +397,12 @@ func (p *PG) InsertPackage(ctx context.Context, pk *Package) error {
 	}
 	pk.UpdatedAt = now
 	_, err := p.pool.Exec(ctx,
-		`INSERT INTO packages (id, slug, path, upstream_repo, upstream_credential_id, kind, display_name, description, release_notes_url, install_instructions_md, source, github_repo, release_pattern, asset_pattern, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+		`INSERT INTO packages (id, slug, path, upstream_repo, upstream_credential_id, kind, display_name, description, release_notes_url, install_instructions_md, source, github_repo, release_pattern, asset_pattern, managed_by, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
 		pk.ID, pk.Slug, pk.Path, pk.UpstreamRepo, pk.UpstreamCredentialID,
 		pk.Kind, pk.DisplayName, pk.Description, pk.ReleaseNotesURL,
 		pk.InstallInstructionsMD, pk.Source, pk.GitHubRepo, pk.ReleasePattern,
-		pk.AssetPattern, pk.CreatedAt, pk.UpdatedAt,
+		pk.AssetPattern, pk.ManagedBy, pk.CreatedAt, pk.UpdatedAt,
 	)
 	return err
 }
@@ -415,11 +415,11 @@ func (p *PG) UpdatePackage(ctx context.Context, pk *Package) error {
 	tag, err := p.pool.Exec(ctx,
 		`UPDATE packages SET slug=$2, path=$3, upstream_repo=$4, upstream_credential_id=$5,
 		 kind=$6, display_name=$7, description=$8, release_notes_url=$9, install_instructions_md=$10,
-		 source=$11, github_repo=$12, release_pattern=$13, asset_pattern=$14, updated_at=$15 WHERE id=$1`,
+		 source=$11, github_repo=$12, release_pattern=$13, asset_pattern=$14, managed_by=$15, updated_at=$16 WHERE id=$1`,
 		pk.ID, pk.Slug, pk.Path, pk.UpstreamRepo, pk.UpstreamCredentialID,
 		pk.Kind, pk.DisplayName, pk.Description, pk.ReleaseNotesURL,
 		pk.InstallInstructionsMD, pk.Source, pk.GitHubRepo, pk.ReleasePattern,
-		pk.AssetPattern, pk.UpdatedAt,
+		pk.AssetPattern, pk.ManagedBy, pk.UpdatedAt,
 	)
 	if err != nil {
 		return err
@@ -443,13 +443,13 @@ func (p *PG) DeletePackage(ctx context.Context, id uuid.UUID) error {
 
 // ---------- licenses ----------
 
-const licenseCols = `id, license_id, customer, organization, tier, expires_at, lic_blob, revoked_at, created_at, updated_at`
+const licenseCols = `id, license_id, customer, organization, tier, expires_at, lic_blob, revoked_at, source, created_at, updated_at`
 
 func scanLicense(row pgx.Row) (*License, error) {
 	var l License
 	err := row.Scan(
 		&l.ID, &l.LicenseID, &l.Customer, &l.Organization, &l.Tier,
-		&l.ExpiresAt, &l.LicBlob, &l.RevokedAt, &l.CreatedAt, &l.UpdatedAt,
+		&l.ExpiresAt, &l.LicBlob, &l.RevokedAt, &l.Source, &l.CreatedAt, &l.UpdatedAt,
 	)
 	if err != nil {
 		return nil, mapErr(err)
@@ -468,7 +468,7 @@ func (p *PG) ListLicenses(ctx context.Context) ([]License, error) {
 		var l License
 		if err := rows.Scan(
 			&l.ID, &l.LicenseID, &l.Customer, &l.Organization, &l.Tier,
-			&l.ExpiresAt, &l.LicBlob, &l.RevokedAt, &l.CreatedAt, &l.UpdatedAt,
+			&l.ExpiresAt, &l.LicBlob, &l.RevokedAt, &l.Source, &l.CreatedAt, &l.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -497,10 +497,10 @@ func (p *PG) InsertLicense(ctx context.Context, l *License) error {
 	}
 	l.UpdatedAt = now
 	_, err := p.pool.Exec(ctx,
-		`INSERT INTO licenses (id, license_id, customer, organization, tier, expires_at, lic_blob, revoked_at, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		`INSERT INTO licenses (id, license_id, customer, organization, tier, expires_at, lic_blob, revoked_at, source, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
 		l.ID, l.LicenseID, l.Customer, l.Organization, l.Tier,
-		l.ExpiresAt, l.LicBlob, l.RevokedAt, l.CreatedAt, l.UpdatedAt,
+		l.ExpiresAt, l.LicBlob, l.RevokedAt, l.Source, l.CreatedAt, l.UpdatedAt,
 	)
 	return err
 }
@@ -608,7 +608,7 @@ func (p *PG) SetActiveRootKey(ctx context.Context, id uuid.UUID) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var hasPriv bool
 	err = tx.QueryRow(ctx,
@@ -771,16 +771,7 @@ func (p *PG) CountActiveCustomerTokens(ctx context.Context) (int, error) {
 
 // ---------- license contacts ----------
 
-const licenseContactCols = `license_id, email, name, created_at, updated_at`
-
-func scanLicenseContact(row pgx.Row) (*LicenseContact, error) {
-	var c LicenseContact
-	err := row.Scan(&c.LicenseID, &c.Email, &c.Name, &c.CreatedAt, &c.UpdatedAt)
-	if err != nil {
-		return nil, mapErr(err)
-	}
-	return &c, nil
-}
+const licenseContactCols = `license_id, email, name, source, created_at, updated_at`
 
 func (p *PG) ListContactsForLicense(ctx context.Context, licenseID uuid.UUID) ([]LicenseContact, error) {
 	rows, err := p.pool.Query(ctx,
@@ -793,7 +784,7 @@ func (p *PG) ListContactsForLicense(ctx context.Context, licenseID uuid.UUID) ([
 	var out []LicenseContact
 	for rows.Next() {
 		var c LicenseContact
-		if err := rows.Scan(&c.LicenseID, &c.Email, &c.Name, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&c.LicenseID, &c.Email, &c.Name, &c.Source, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -801,15 +792,39 @@ func (p *PG) ListContactsForLicense(ctx context.Context, licenseID uuid.UUID) ([
 	return out, rows.Err()
 }
 
+func (p *PG) ListManifestContactsForLicense(ctx context.Context, licenseID uuid.UUID) ([]LicenseContact, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT `+licenseContactCols+` FROM license_contacts WHERE license_id=$1 AND source='manifest' ORDER BY created_at ASC`,
+		licenseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LicenseContact
+	for rows.Next() {
+		var c LicenseContact
+		if err := rows.Scan(&c.LicenseID, &c.Email, &c.Name, &c.Source, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// AddContact upserts a contact. On conflict, name is preserved when the new
+// row's name is empty, and source is updated only when the new row's source is
+// non-empty — so UI re-adds (source='') don't downgrade manifest-owned rows
+// and manifest re-applies don't strip rows that were originally added via UI.
 func (p *PG) AddContact(ctx context.Context, c *LicenseContact) error {
 	c.Email = strings.ToLower(c.Email)
 	_, err := p.pool.Exec(ctx,
-		`INSERT INTO license_contacts (license_id, email, name)
-		 VALUES ($1, LOWER($2), $3)
+		`INSERT INTO license_contacts (license_id, email, name, source)
+		 VALUES ($1, LOWER($2), $3, $4)
 		 ON CONFLICT (license_id, email) DO UPDATE
-		   SET name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE license_contacts.name END,
+		   SET name   = CASE WHEN EXCLUDED.name   <> '' THEN EXCLUDED.name   ELSE license_contacts.name   END,
+		       source = CASE WHEN EXCLUDED.source <> '' THEN EXCLUDED.source ELSE license_contacts.source END,
 		       updated_at = now()`,
-		c.LicenseID, c.Email, c.Name)
+		c.LicenseID, c.Email, c.Name, c.Source)
 	return err
 }
 
@@ -820,11 +835,36 @@ func (p *PG) RemoveContact(ctx context.Context, licenseID uuid.UUID, email strin
 	return err
 }
 
+// ReplaceManifestContactsForLicense atomically replaces the manifest-owned
+// contact set for one license. UI rows (source='') are untouched.
+func (p *PG) ReplaceManifestContactsForLicense(ctx context.Context, licenseID uuid.UUID, contacts []LicenseContact) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM license_contacts WHERE license_id=$1 AND source='manifest'`, licenseID); err != nil {
+		return err
+	}
+	for _, c := range contacts {
+		email := strings.ToLower(c.Email)
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO license_contacts (license_id, email, name, source)
+			 VALUES ($1, LOWER($2), $3, 'manifest')`,
+			licenseID, email, c.Name); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
 func (p *PG) FindLicensesByContactEmail(ctx context.Context, email string) ([]License, error) {
 	email = strings.ToLower(email)
 	rows, err := p.pool.Query(ctx,
 		`SELECT l.id, l.license_id, l.customer, l.organization, l.tier,
-		        l.expires_at, l.lic_blob, l.revoked_at, l.created_at, l.updated_at
+		        l.expires_at, l.lic_blob, l.revoked_at, l.source, l.created_at, l.updated_at
 		 FROM licenses l
 		 INNER JOIN license_contacts c ON c.license_id = l.id
 		 WHERE c.email = $1 AND l.revoked_at IS NULL
@@ -838,7 +878,7 @@ func (p *PG) FindLicensesByContactEmail(ctx context.Context, email string) ([]Li
 		var l License
 		if err := rows.Scan(
 			&l.ID, &l.LicenseID, &l.Customer, &l.Organization, &l.Tier,
-			&l.ExpiresAt, &l.LicBlob, &l.RevokedAt, &l.CreatedAt, &l.UpdatedAt,
+			&l.ExpiresAt, &l.LicBlob, &l.RevokedAt, &l.Source, &l.CreatedAt, &l.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -872,7 +912,7 @@ func (p *PG) GrantedPackagesForLicense(ctx context.Context, licenseID uuid.UUID)
 		`SELECT p.id, p.slug, p.path, p.upstream_repo, p.upstream_credential_id,
 		        p.kind, p.display_name, p.description, p.release_notes_url,
 		        p.install_instructions_md, p.source, p.github_repo, p.release_pattern,
-		        p.asset_pattern, p.created_at, p.updated_at
+		        p.asset_pattern, p.managed_by, p.created_at, p.updated_at
 		 FROM packages p
 		 INNER JOIN package_grants g ON g.package_id = p.id
 		 WHERE g.license_id = $1
@@ -888,7 +928,7 @@ func (p *PG) GrantedPackagesForLicense(ctx context.Context, licenseID uuid.UUID)
 			&pk.ID, &pk.Slug, &pk.Path, &pk.UpstreamRepo, &pk.UpstreamCredentialID,
 			&pk.Kind, &pk.DisplayName, &pk.Description, &pk.ReleaseNotesURL,
 			&pk.InstallInstructionsMD, &pk.Source, &pk.GitHubRepo, &pk.ReleasePattern,
-			&pk.AssetPattern, &pk.CreatedAt, &pk.UpdatedAt,
+			&pk.AssetPattern, &pk.ManagedBy, &pk.CreatedAt, &pk.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}

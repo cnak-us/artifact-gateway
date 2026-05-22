@@ -63,15 +63,6 @@ func handleConfigApply(d AdminDeps) http.HandlerFunc {
 			return
 		}
 
-		// Refresh OIDC registry if any provider items were touched and we
-		// actually wrote — otherwise dry-run wouldn't see the previous
-		// providers go stale.
-		if !opts.DryRun && d.OIDCRegistry != nil && anyProviderTouched(report) {
-			if rerr := d.OIDCRegistry.Reload(r.Context()); rerr != nil {
-				d.Logger.Warn("oidc registry reload after apply failed", "err", rerr)
-			}
-		}
-
 		// Audit one event per non-noop item so the trail captures who applied
 		// what. Skip noop and skip everything in dry-run (no state change to
 		// audit).
@@ -87,7 +78,15 @@ func handleConfigApply(d AdminDeps) http.HandlerFunc {
 			}
 		}
 
-		writeJSON(w, http.StatusOK, report)
+		// Per-item errors are not fatal — partial successes are valid. Use
+		// 207 Multi-Status to signal "some items applied, some didn't" so the
+		// UI can render the failure list without forcing a binary success/fail
+		// posture. The body is the same ApplyReport in both cases.
+		status := http.StatusOK
+		if len(report.Errors) > 0 {
+			status = http.StatusMultiStatus
+		}
+		writeJSON(w, status, report)
 	}
 }
 
@@ -114,37 +113,14 @@ func handleConfigExport(d AdminDeps) http.HandlerFunc {
 // secret field set to the literal placeholder so the operator sees field
 // presence but has to re-enter the secret before next apply. This is the
 // "show me what's configured" path, not a backup path.
+//
+// Auth surfaces (OIDC providers, static admins) are intentionally omitted —
+// they are env-var configured at deploy time and not part of the CR.
 func exportManifest(ctx context.Context, st store.DataStore) (*apply.Manifest, error) {
 	mf := &apply.Manifest{
 		APIVersion: apply.APIVersion,
 		Kind:       apply.Kind,
 		Metadata:   apply.Metadata{Name: "default"},
-	}
-
-	staticAdmins, err := st.ListStaticAdmins(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list static admins: %w", err)
-	}
-	for _, sa := range staticAdmins {
-		mf.Spec.StaticAdmins = append(mf.Spec.StaticAdmins, apply.StaticAdminSpec{
-			Email:    sa.Email,
-			Password: redactedSecret,
-		})
-	}
-
-	providers, err := st.ListOIDCProviders(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list oidc providers: %w", err)
-	}
-	for _, p := range providers {
-		mf.Spec.OIDCProviders = append(mf.Spec.OIDCProviders, apply.OIDCProviderSpec{
-			Name:         p.Name,
-			IssuerURL:    p.IssuerURL,
-			ClientID:     p.ClientID,
-			ClientSecret: redactedSecret,
-			Scopes:       p.Scopes,
-			Enabled:      p.Enabled,
-		})
 	}
 
 	creds, err := st.ListUpstreamCredentials(ctx)
@@ -239,15 +215,6 @@ func exportManifest(ctx context.Context, st store.DataStore) (*apply.Manifest, e
 	}
 
 	return mf, nil
-}
-
-func anyProviderTouched(rep *apply.ApplyReport) bool {
-	for _, it := range rep.Items {
-		if it.Kind == apply.KindOIDCProvider && it.Action != apply.ActionNoop {
-			return true
-		}
-	}
-	return false
 }
 
 func queryBool(r *http.Request, key string) bool {

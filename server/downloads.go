@@ -381,19 +381,32 @@ func (h *downloadsHandler) signDownload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Resolve the actor's license + package + entitlement.
+	// Resolve the actor's license + package + entitlement. OIDC catalog
+	// sessions have no customer_token row (UserID is the nil UUID); they
+	// resolve entitlement through the license_contacts email mapping, same
+	// as the catalog browse + listReleases paths.
+	var (
+		lic *store.License
+		ct  *store.CustomerToken
+	)
 	if s.UserID == uuidNil {
-		writeJSONErr(w, http.StatusForbidden, "no entitled license for this session")
-		return
-	}
-	ct, err := h.d.Store.GetCustomerToken(r.Context(), s.UserID)
-	if err != nil {
-		h.writeUnauthorized(w, source, "session stale")
-		return
-	}
-	lic, ok := h.loadLicense(w, r, ct, source)
-	if !ok {
-		return
+		var ok bool
+		lic, ok = h.loadLicenseByContactEmail(w, r, s.Email, source)
+		if !ok {
+			return
+		}
+	} else {
+		var err error
+		ct, err = h.d.Store.GetCustomerToken(r.Context(), s.UserID)
+		if err != nil {
+			h.writeUnauthorized(w, source, "session stale")
+			return
+		}
+		var ok bool
+		lic, ok = h.loadLicense(w, r, ct, source)
+		if !ok {
+			return
+		}
 	}
 	pkg, ok := h.resolvePackage(w, r, body.Slug, lic, source)
 	if !ok {
@@ -409,7 +422,7 @@ func (h *downloadsHandler) signDownload(w http.ResponseWriter, r *http.Request) 
 
 	dlPath := fmt.Sprintf("/download/%s/%s/%s", body.Slug, body.Tag, body.Asset)
 	subject := s.Email
-	if subject == "" {
+	if subject == "" && ct != nil {
 		subject = ct.TokenID
 	}
 	tok, exp, err := h.d.Signer.SignDownloadURL(subject, dlPath, signedURLTTL)
@@ -604,12 +617,6 @@ func (h *downloadsHandler) loadCredAndPAT(ctx context.Context, pkg *store.Packag
 		return nil, "", fmt.Errorf("decrypt pat: %w", err)
 	}
 	return cred, string(pat), nil
-}
-
-// loadPAT preserves the older API for callers that don't need the cred row.
-func (h *downloadsHandler) loadPAT(ctx context.Context, pkg *store.Package) (string, error) {
-	_, pat, err := h.loadCredAndPAT(ctx, pkg)
-	return pat, err
 }
 
 // handleGitHubErr maps a GitHub client error to an HTTP response + metric.

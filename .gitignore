@@ -3,7 +3,8 @@ artifact-gateway.exe
 *.log
 .env
 .env.local
-ui/dist
+ui/dist/*
+!ui/dist/.gitkeep
 ui/src/node_modules
 ui/src/dist
 ui/src/.vite

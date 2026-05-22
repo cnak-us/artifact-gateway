@@ -113,8 +113,7 @@ func TestBearerExchangeFullCycle(t *testing.T) {
 	}))
 	defer realmSrv.Close()
 
-	var regSrv *httptest.Server
-	regSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	regSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		regHits++
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 			lastBearer = auth

@@ -39,11 +39,15 @@ func (garMinter) Mint(ctx context.Context, secret []byte, configJSON []byte) (mi
 	if len(scopes) == 0 {
 		scopes = []string{"https://www.googleapis.com/auth/cloud-platform.read-only"}
 	}
-	creds, err := google.CredentialsFromJSON(ctx, secret, scopes...)
+	// JWTConfigFromJSON only accepts service-account JSON keys, which is the
+	// only credential shape we accept for GAR issuers. Using it (instead of
+	// the deprecated CredentialsFromJSON) avoids the unvalidated-config risk
+	// flagged by SA1019.
+	cfg, err := google.JWTConfigFromJSON(secret, scopes...)
 	if err != nil {
 		return mintedToken{}, fmt.Errorf("parse gcp credentials: %w", err)
 	}
-	tok, err := creds.TokenSource.Token()
+	tok, err := cfg.TokenSource(ctx).Token()
 	if err != nil {
 		return mintedToken{}, fmt.Errorf("mint gcp access token: %w", err)
 	}

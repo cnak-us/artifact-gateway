@@ -23,7 +23,7 @@ data:
     When bundled Dex is enabled, surface the issuer + client-id to the gateway
     so bootstrapDexProvider (main.go) inserts the OIDC provider row on startup.
     Without these the registry has no "dex" entry and /api/v1/auth/oidc/dex/start
-    returns 404 — i.e. dl.cnak.us never redirects to dex-dl.cnak.us.
+    returns 404 — i.e. dl.cnak.us never redirects to dex.cnak.us.
     DEX_CLIENT_SECRET lives in the env Secret alongside other crypto material.
   */}}
   {{- if .Values.dex.enabled }}

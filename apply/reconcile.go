@@ -2,8 +2,8 @@ package apply
 
 import (
 	"context"
-	"crypto/subtle"
 	"fmt"
+	"net/mail"
 	"sort"
 	"strings"
 	"time"
@@ -17,12 +17,11 @@ import (
 // Kind constants used in ApplyItem.Kind. Mirrors the resource_type strings
 // used by the audit logger so dashboards stay consistent.
 const (
-	KindStaticAdmin        = "static-admin"
-	KindOIDCProvider       = "oidc-provider"
 	KindUpstreamCredential = "upstream-credential"
 	KindPackage            = "package"
 	KindLicense            = "license"
 	KindGrant              = "grant"
+	KindContact            = "contact"
 )
 
 // Action constants used in ApplyItem.Action.
@@ -32,6 +31,12 @@ const (
 	ActionNoop   = "noop"
 	ActionDelete = "delete"
 )
+
+// sourceManifest tags rows owned by the manifest reconciler. Prune only
+// touches rows whose `source` column equals this value — admin-UI-created
+// rows (which write source='') are left alone even when they aren't named in
+// the manifest.
+const sourceManifest = "manifest"
 
 // ApplyReport captures the outcome of a Reconcile call. JSON tags match the
 // REST envelope returned by /api/v1/config/apply.
@@ -64,24 +69,24 @@ type Options struct {
 	// DryRun computes the plan and reports diffs without writing anything.
 	DryRun bool
 	// Prune deletes manifest-managed resources that aren't in the manifest.
-	// Currently only enforced for static_admins where source='manifest' rows
-	// are unambiguously owned by this code path. Other kinds (packages,
-	// licenses, etc.) are pruned conservatively — items in the manifest are
-	// created/updated, items in the DB but NOT in the manifest are deleted.
+	// Only rows tagged source='manifest' are touched — admin-UI-created rows
+	// (source='') are preserved even when they don't appear in the manifest.
+	// Prune passes run dependents-first (grants -> packages -> licenses ->
+	// credentials) so FK RESTRICT constraints can't trip the deletion order.
 	Prune bool
 }
 
 // Reconcile walks the manifest and brings the store into agreement with it.
 //
-// Order matters: upstreamCredentials → packages → licenses → grants →
-// oidcProviders → staticAdmins. Each kind processes all of its items even if
-// some fail (errors aggregate into the report), but cross-kind references
-// (packages referencing credentials, grants referencing licenses+packages)
-// require earlier kinds to have produced usable rows.
+// Order matters in two distinct phases:
 //
-// The reconciler doesn't open its own transaction — pgxpool transactions are
-// per-connection and we'd serialize concurrent applies in a way that hurts.
-// Instead each item is best-effort: failures are recorded, prior writes
+//   create/update: upstreamCredentials -> packages -> licenses -> grants
+//   prune        : grants -> packages -> licenses -> credentials
+//
+// The prune phase runs dependents-first so the FK from packages to
+// upstream_credentials (ON DELETE RESTRICT) cannot block a credential delete.
+//
+// Each item is best-effort: failures are recorded in rep.Errors, prior writes
 // remain. Operators retry by re-applying — operations are idempotent.
 func Reconcile(
 	ctx context.Context,
@@ -96,31 +101,43 @@ func Reconcile(
 	}
 	rep := &ApplyReport{DryRun: opts.DryRun}
 
-	credNameToID, err := reconcileUpstreamCredentials(ctx, st, crypto, mf.Spec.UpstreamCredentials, opts, rep)
+	credState, err := reconcileUpstreamCredentials(ctx, st, crypto, mf.Spec.UpstreamCredentials, opts, rep)
 	if err != nil {
 		return rep, err
 	}
-	pkgSlugToID, err := reconcilePackages(ctx, st, mf.Spec.Packages, credNameToID, opts, rep)
+	pkgState, err := reconcilePackages(ctx, st, mf.Spec.Packages, credState.nameToID, opts, rep)
 	if err != nil {
 		return rep, err
 	}
-	licIDToRowID, err := reconcileLicenses(ctx, st, verifier, mf.Spec.Licenses, opts, rep)
+	licState, err := reconcileLicenses(ctx, st, verifier, mf.Spec.Licenses, opts, rep)
 	if err != nil {
 		return rep, err
 	}
-	if err := reconcileGrants(ctx, st, mf.Spec.Grants, licIDToRowID, pkgSlugToID, opts, rep); err != nil {
+	contactsTouched := reconcileContacts(ctx, st, verifier, mf.Spec.Licenses, licState.idToRowID, opts, rep)
+	grantsTouched, err := reconcileGrants(ctx, st, mf.Spec.Grants, licState.idToRowID, pkgState.slugToID, opts, rep)
+	if err != nil {
 		return rep, err
 	}
-	if err := reconcileOIDCProviders(ctx, st, crypto, mf.Spec.OIDCProviders, opts, rep); err != nil {
-		return rep, err
+
+	// Prune phase: dependents-first so FK RESTRICT cannot block deletes.
+	if opts.Prune {
+		pruneGrants(ctx, st, licState.existing, grantsTouched, opts, rep)
+		pruneContacts(ctx, st, licState.existing, contactsTouched, opts, rep)
+		prunePackages(ctx, st, pkgState.existing, pkgState.seen, opts, rep)
+		pruneLicenses(ctx, st, licState.existing, licState.seen, opts, rep)
+		pruneUpstreamCredentials(ctx, st, credState.existing, credState.seen, opts, rep)
 	}
-	if err := reconcileStaticAdmins(ctx, st, mf.Spec.StaticAdmins, opts, rep); err != nil {
-		return rep, err
-	}
+
 	return rep, nil
 }
 
 // --- upstream credentials ---------------------------------------------------
+
+type upstreamCredentialState struct {
+	nameToID map[string]uuid.UUID
+	existing []store.UpstreamCredential
+	seen     map[string]struct{}
+}
 
 func reconcileUpstreamCredentials(
 	ctx context.Context,
@@ -129,7 +146,7 @@ func reconcileUpstreamCredentials(
 	specs []UpstreamCredentialSpec,
 	opts Options,
 	rep *ApplyReport,
-) (map[string]uuid.UUID, error) {
+) (*upstreamCredentialState, error) {
 	existing, err := st.ListUpstreamCredentials(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list upstream credentials: %w", err)
@@ -185,6 +202,11 @@ func reconcileUpstreamCredentials(
 			if prev.InsecureSkipTLSVerify != s.InsecureSkipTLSVerify {
 				diff = append(diff, "insecureSkipTlsVerify")
 			}
+			// Tagging a previously-untagged row counts as a change so we can
+			// surface that the manifest is "adopting" it on the next apply.
+			if prev.Source != sourceManifest {
+				diff = append(diff, "source")
+			}
 			if len(diff) == 0 {
 				rep.Items = append(rep.Items, ApplyItem{Kind: KindUpstreamCredential, Name: s.Name, Action: ActionNoop})
 				continue
@@ -206,6 +228,7 @@ func reconcileUpstreamCredentials(
 				ID: prev.ID, Name: s.Name, Kind: kind, Username: s.Username,
 				PATEnc: sealed, PATFingerprint: fp,
 				BaseURL: baseURL, CABundlePEM: s.CABundlePEM, InsecureSkipTLSVerify: s.InsecureSkipTLSVerify,
+				Source: sourceManifest,
 			}
 			if err := st.InsertUpstreamCredential(ctx, row); err != nil {
 				rep.Errors = append(rep.Errors, ApplyError{Kind: KindUpstreamCredential, Name: s.Name, Message: err.Error()})
@@ -229,6 +252,7 @@ func reconcileUpstreamCredentials(
 			ID: uuid.New(), Name: s.Name, Kind: kind, Username: s.Username,
 			PATEnc: sealed, PATFingerprint: fp,
 			BaseURL: baseURL, CABundlePEM: s.CABundlePEM, InsecureSkipTLSVerify: s.InsecureSkipTLSVerify,
+			Source: sourceManifest,
 		}
 		if err := st.InsertUpstreamCredential(ctx, row); err != nil {
 			rep.Errors = append(rep.Errors, ApplyError{Kind: KindUpstreamCredential, Name: s.Name, Message: err.Error()})
@@ -238,22 +262,6 @@ func reconcileUpstreamCredentials(
 		rep.Items = append(rep.Items, ApplyItem{Kind: KindUpstreamCredential, Name: s.Name, Action: ActionCreate})
 	}
 
-	if opts.Prune {
-		for _, prev := range existing {
-			if _, kept := seen[prev.Name]; kept {
-				continue
-			}
-			if opts.DryRun {
-				rep.Items = append(rep.Items, ApplyItem{Kind: KindUpstreamCredential, Name: prev.Name, Action: ActionDelete})
-				continue
-			}
-			if err := st.DeleteUpstreamCredential(ctx, prev.ID); err != nil {
-				rep.Errors = append(rep.Errors, ApplyError{Kind: KindUpstreamCredential, Name: prev.Name, Message: "prune: " + err.Error()})
-				continue
-			}
-			rep.Items = append(rep.Items, ApplyItem{Kind: KindUpstreamCredential, Name: prev.Name, Action: ActionDelete})
-		}
-	}
 	// Backfill `out` with rows we didn't touch but exist (lets packages
 	// reference creds that weren't redeclared in the manifest).
 	for _, prev := range existing {
@@ -261,10 +269,45 @@ func reconcileUpstreamCredentials(
 			out[prev.Name] = prev.ID
 		}
 	}
-	return out, nil
+	return &upstreamCredentialState{nameToID: out, existing: existing, seen: seen}, nil
+}
+
+func pruneUpstreamCredentials(
+	ctx context.Context,
+	st store.DataStore,
+	existing []store.UpstreamCredential,
+	seen map[string]struct{},
+	opts Options,
+	rep *ApplyReport,
+) {
+	for _, prev := range existing {
+		if _, kept := seen[prev.Name]; kept {
+			continue
+		}
+		// Only prune rows the manifest owns. Admin-UI-created rows (source='')
+		// are not part of any manifest's world.
+		if prev.Source != sourceManifest {
+			continue
+		}
+		if opts.DryRun {
+			rep.Items = append(rep.Items, ApplyItem{Kind: KindUpstreamCredential, Name: prev.Name, Action: ActionDelete})
+			continue
+		}
+		if err := st.DeleteUpstreamCredential(ctx, prev.ID); err != nil {
+			rep.Errors = append(rep.Errors, ApplyError{Kind: KindUpstreamCredential, Name: prev.Name, Message: "prune: " + err.Error()})
+			continue
+		}
+		rep.Items = append(rep.Items, ApplyItem{Kind: KindUpstreamCredential, Name: prev.Name, Action: ActionDelete})
+	}
 }
 
 // --- packages ---------------------------------------------------------------
+
+type packageState struct {
+	slugToID map[string]uuid.UUID
+	existing []store.Package
+	seen     map[string]struct{}
+}
 
 func reconcilePackages(
 	ctx context.Context,
@@ -273,7 +316,7 @@ func reconcilePackages(
 	credNameToID map[string]uuid.UUID,
 	opts Options,
 	rep *ApplyReport,
-) (map[string]uuid.UUID, error) {
+) (*packageState, error) {
 	existing, err := st.ListPackages(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list packages: %w", err)
@@ -360,11 +403,15 @@ func reconcilePackages(
 			ReleaseNotesURL: s.ReleaseNotesURL, InstallInstructionsMD: s.InstallInstructionsMD,
 			Source: source, GitHubRepo: s.GitHubRepo,
 			ReleasePattern: s.ReleasePattern, AssetPattern: s.AssetPattern,
+			ManagedBy: sourceManifest,
 		}
 
 		if prev, ok := bySlug[s.Slug]; ok {
 			out[s.Slug] = prev.ID
 			diff := diffPackage(&prev, &desired)
+			if prev.ManagedBy != sourceManifest {
+				diff = append(diff, "managed_by")
+			}
 			if len(diff) == 0 {
 				rep.Items = append(rep.Items, ApplyItem{Kind: KindPackage, Name: s.Slug, Action: ActionNoop})
 				continue
@@ -398,28 +445,39 @@ func reconcilePackages(
 		rep.Items = append(rep.Items, ApplyItem{Kind: KindPackage, Name: s.Slug, Action: ActionCreate})
 	}
 
-	if opts.Prune {
-		for _, prev := range existing {
-			if _, kept := seen[prev.Slug]; kept {
-				continue
-			}
-			if opts.DryRun {
-				rep.Items = append(rep.Items, ApplyItem{Kind: KindPackage, Name: prev.Slug, Action: ActionDelete})
-				continue
-			}
-			if err := st.DeletePackage(ctx, prev.ID); err != nil {
-				rep.Errors = append(rep.Errors, ApplyError{Kind: KindPackage, Name: prev.Slug, Message: "prune: " + err.Error()})
-				continue
-			}
-			rep.Items = append(rep.Items, ApplyItem{Kind: KindPackage, Name: prev.Slug, Action: ActionDelete})
-		}
-	}
 	for _, prev := range existing {
 		if _, has := out[prev.Slug]; !has {
 			out[prev.Slug] = prev.ID
 		}
 	}
-	return out, nil
+	return &packageState{slugToID: out, existing: existing, seen: seen}, nil
+}
+
+func prunePackages(
+	ctx context.Context,
+	st store.DataStore,
+	existing []store.Package,
+	seen map[string]struct{},
+	opts Options,
+	rep *ApplyReport,
+) {
+	for _, prev := range existing {
+		if _, kept := seen[prev.Slug]; kept {
+			continue
+		}
+		if prev.ManagedBy != sourceManifest {
+			continue
+		}
+		if opts.DryRun {
+			rep.Items = append(rep.Items, ApplyItem{Kind: KindPackage, Name: prev.Slug, Action: ActionDelete})
+			continue
+		}
+		if err := st.DeletePackage(ctx, prev.ID); err != nil {
+			rep.Errors = append(rep.Errors, ApplyError{Kind: KindPackage, Name: prev.Slug, Message: "prune: " + err.Error()})
+			continue
+		}
+		rep.Items = append(rep.Items, ApplyItem{Kind: KindPackage, Name: prev.Slug, Action: ActionDelete})
+	}
 }
 
 func diffPackage(prev, next *store.Package) []string {
@@ -465,6 +523,12 @@ func diffPackage(prev, next *store.Package) []string {
 
 // --- licenses ---------------------------------------------------------------
 
+type licenseState struct {
+	idToRowID map[string]uuid.UUID
+	existing  []store.License
+	seen      map[string]struct{}
+}
+
 func reconcileLicenses(
 	ctx context.Context,
 	st store.DataStore,
@@ -472,7 +536,7 @@ func reconcileLicenses(
 	specs []LicenseSpec,
 	opts Options,
 	rep *ApplyReport,
-) (map[string]uuid.UUID, error) {
+) (*licenseState, error) {
 	existing, err := st.ListLicenses(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list licenses: %w", err)
@@ -530,6 +594,7 @@ func reconcileLicenses(
 			Organization: parsed.Organization,
 			Tier:         parsed.Tier,
 			LicBlob:      s.LicBlob,
+			Source:       sourceManifest,
 		}
 		if exp, ok := parseLicenseExpiry(parsed); ok {
 			row.ExpiresAt = &exp
@@ -542,28 +607,39 @@ func reconcileLicenses(
 		rep.Items = append(rep.Items, ApplyItem{Kind: KindLicense, Name: parsed.ID, Action: ActionCreate})
 	}
 
-	if opts.Prune {
-		for _, prev := range existing {
-			if _, kept := seen[prev.LicenseID]; kept {
-				continue
-			}
-			if opts.DryRun {
-				rep.Items = append(rep.Items, ApplyItem{Kind: KindLicense, Name: prev.LicenseID, Action: ActionDelete})
-				continue
-			}
-			if err := st.DeleteLicense(ctx, prev.ID); err != nil {
-				rep.Errors = append(rep.Errors, ApplyError{Kind: KindLicense, Name: prev.LicenseID, Message: "prune: " + err.Error()})
-				continue
-			}
-			rep.Items = append(rep.Items, ApplyItem{Kind: KindLicense, Name: prev.LicenseID, Action: ActionDelete})
-		}
-	}
 	for _, prev := range existing {
 		if _, has := out[prev.LicenseID]; !has {
 			out[prev.LicenseID] = prev.ID
 		}
 	}
-	return out, nil
+	return &licenseState{idToRowID: out, existing: existing, seen: seen}, nil
+}
+
+func pruneLicenses(
+	ctx context.Context,
+	st store.DataStore,
+	existing []store.License,
+	seen map[string]struct{},
+	opts Options,
+	rep *ApplyReport,
+) {
+	for _, prev := range existing {
+		if _, kept := seen[prev.LicenseID]; kept {
+			continue
+		}
+		if prev.Source != sourceManifest {
+			continue
+		}
+		if opts.DryRun {
+			rep.Items = append(rep.Items, ApplyItem{Kind: KindLicense, Name: prev.LicenseID, Action: ActionDelete})
+			continue
+		}
+		if err := st.DeleteLicense(ctx, prev.ID); err != nil {
+			rep.Errors = append(rep.Errors, ApplyError{Kind: KindLicense, Name: prev.LicenseID, Message: "prune: " + err.Error()})
+			continue
+		}
+		rep.Items = append(rep.Items, ApplyItem{Kind: KindLicense, Name: prev.LicenseID, Action: ActionDelete})
+	}
 }
 
 // parseLicenseExpiry duplicates server/admin.go's helper to keep the apply
@@ -581,6 +657,11 @@ func parseLicenseExpiry(l *license.License) (time.Time, bool) {
 
 // --- grants ----------------------------------------------------------------
 
+// reconcileGrants applies the manifest's grant set. Returns the set of
+// license row UUIDs that the manifest "touched" — used by pruneGrants to
+// distinguish "license still in manifest but no grants here" (clear orphans)
+// from "license absent from manifest entirely" (cascades when the license
+// row is dropped).
 func reconcileGrants(
 	ctx context.Context,
 	st store.DataStore,
@@ -589,8 +670,9 @@ func reconcileGrants(
 	pkgSlugToID map[string]uuid.UUID,
 	opts Options,
 	rep *ApplyReport,
-) error {
+) (map[uuid.UUID]struct{}, error) {
 	seen := make(map[string]struct{}, len(specs))
+	touchedLicRowIDs := make(map[uuid.UUID]struct{}, len(specs))
 	for _, g := range specs {
 		if g.License == "" {
 			rep.Errors = append(rep.Errors, ApplyError{Kind: KindGrant, Message: "license is required"})
@@ -610,6 +692,7 @@ func reconcileGrants(
 			})
 			continue
 		}
+		touchedLicRowIDs[licRowID] = struct{}{}
 		actions := g.Actions
 		if len(actions) == 0 {
 			actions = []string{"pull"}
@@ -657,7 +740,48 @@ func reconcileGrants(
 		}
 		rep.Items = append(rep.Items, ApplyItem{Kind: KindGrant, Name: g.License, Action: action})
 	}
-	return nil
+	return touchedLicRowIDs, nil
+}
+
+// pruneGrants handles the "license kept, grants emptied" case: when a license
+// is still present in the manifest but its grants entry was zeroed/dropped,
+// we clear the existing grants. The reverse case ("license dropped entirely")
+// already cascades through licenses.id ON DELETE CASCADE — no work needed.
+func pruneGrants(
+	ctx context.Context,
+	st store.DataStore,
+	existingLicenses []store.License,
+	touched map[uuid.UUID]struct{},
+	opts Options,
+	rep *ApplyReport,
+) {
+	for _, lic := range existingLicenses {
+		if _, t := touched[lic.ID]; t {
+			continue
+		}
+		// Only consider licenses managed by the manifest; admin-UI licenses
+		// own their own grant set.
+		if lic.Source != sourceManifest {
+			continue
+		}
+		current, err := st.ListGrantsForLicense(ctx, lic.ID)
+		if err != nil {
+			rep.Errors = append(rep.Errors, ApplyError{Kind: KindGrant, Name: lic.LicenseID, Message: "list-for-prune: " + err.Error()})
+			continue
+		}
+		if len(current) == 0 {
+			continue
+		}
+		if opts.DryRun {
+			rep.Items = append(rep.Items, ApplyItem{Kind: KindGrant, Name: lic.LicenseID, Action: ActionDelete})
+			continue
+		}
+		if err := st.ReplaceGrantsForLicense(ctx, lic.ID, nil, nil); err != nil {
+			rep.Errors = append(rep.Errors, ApplyError{Kind: KindGrant, Name: lic.LicenseID, Message: "prune: " + err.Error()})
+			continue
+		}
+		rep.Items = append(rep.Items, ApplyItem{Kind: KindGrant, Name: lic.LicenseID, Action: ActionDelete})
+	}
 }
 
 // grantsEqual checks set equality of (package_id, actions) against desired.
@@ -697,255 +821,155 @@ func stringSliceEqual(a, b []string) bool {
 	return true
 }
 
-// --- oidc providers ---------------------------------------------------------
+// --- contacts ---------------------------------------------------------------
 
-func reconcileOIDCProviders(
+// reconcileContacts applies each license spec's contacts list. Returns the set
+// of license row UUIDs whose contact set the manifest touched — used by
+// pruneContacts to distinguish "license still in manifest, no contacts here"
+// (clear manifest-owned rows) from "license absent from manifest entirely"
+// (which we leave alone; the license itself will be pruned or kept based on
+// its own source tag, and CASCADE will tidy up if it goes).
+func reconcileContacts(
 	ctx context.Context,
 	st store.DataStore,
-	crypto *auth.Crypto,
-	specs []OIDCProviderSpec,
+	verifier license.Verifier,
+	licSpecs []LicenseSpec,
+	licIDToRowID map[string]uuid.UUID,
 	opts Options,
 	rep *ApplyReport,
-) error {
-	existing, err := st.ListOIDCProviders(ctx)
-	if err != nil {
-		return fmt.Errorf("list oidc providers: %w", err)
-	}
-	byName := make(map[string]store.OIDCProvider, len(existing))
-	for _, p := range existing {
-		byName[p.Name] = p
-	}
-	seen := make(map[string]struct{}, len(specs))
-
-	for _, s := range specs {
-		if s.Name == "" {
-			rep.Errors = append(rep.Errors, ApplyError{Kind: KindOIDCProvider, Message: "name is required"})
+) map[uuid.UUID]struct{} {
+	touched := make(map[uuid.UUID]struct{}, len(licSpecs))
+	for _, ls := range licSpecs {
+		// Re-verify the blob to recover the canonical license ID. If the
+		// license itself failed to reconcile (idToRowID has no entry) we skip
+		// — the error was already recorded by reconcileLicenses.
+		parsed, err := verifier.VerifyLicenseBlob(ls.LicBlob)
+		if err != nil || parsed == nil || parsed.ID == "" {
 			continue
 		}
-		if _, dup := seen[s.Name]; dup {
-			rep.Errors = append(rep.Errors, ApplyError{Kind: KindOIDCProvider, Name: s.Name, Message: "duplicate name in manifest"})
+		licIDGuess := parsed.ID
+		licRowID, ok := licIDToRowID[licIDGuess]
+		if !ok {
 			continue
 		}
-		seen[s.Name] = struct{}{}
+		touched[licRowID] = struct{}{}
 
-		if s.IssuerURL == "" || s.ClientID == "" || s.ClientSecret == "" {
+		// Validate, lowercase, trim, dedupe within this license spec.
+		desired := make([]store.LicenseContact, 0, len(ls.Contacts))
+		seenEmail := make(map[string]struct{}, len(ls.Contacts))
+		for _, c := range ls.Contacts {
+			email := strings.ToLower(strings.TrimSpace(c.Email))
+			if email == "" {
+				rep.Errors = append(rep.Errors, ApplyError{
+					Kind: KindContact, Name: licIDGuess, Message: "email is required",
+				})
+				continue
+			}
+			if _, err := mail.ParseAddress(email); err != nil {
+				rep.Errors = append(rep.Errors, ApplyError{
+					Kind: KindContact, Name: licIDGuess + "/" + email,
+					Message: "invalid email: " + err.Error(),
+				})
+				continue
+			}
+			if _, dup := seenEmail[email]; dup {
+				rep.Errors = append(rep.Errors, ApplyError{
+					Kind: KindContact, Name: licIDGuess + "/" + email,
+					Message: "duplicate email in manifest entry",
+				})
+				continue
+			}
+			seenEmail[email] = struct{}{}
+			desired = append(desired, store.LicenseContact{
+				LicenseID: licRowID,
+				Email:     email,
+				Name:      strings.TrimSpace(c.Name),
+				Source:    sourceManifest,
+			})
+		}
+
+		current, err := st.ListManifestContactsForLicense(ctx, licRowID)
+		if err != nil {
 			rep.Errors = append(rep.Errors, ApplyError{
-				Kind: KindOIDCProvider, Name: s.Name,
-				Message: "issuerUrl, clientId, and clientSecret are required",
+				Kind: KindContact, Name: licIDGuess, Message: err.Error(),
 			})
 			continue
 		}
+		currentByEmail := make(map[string]store.LicenseContact, len(current))
+		for _, c := range current {
+			currentByEmail[strings.ToLower(c.Email)] = c
+		}
+		desiredByEmail := make(map[string]store.LicenseContact, len(desired))
+		for _, c := range desired {
+			desiredByEmail[c.Email] = c
+		}
 
-		if prev, ok := byName[s.Name]; ok {
-			// Diff via best-effort decrypt; if decrypt fails we treat secret
-			// as different and re-seal.
-			var diff []string
-			if prev.IssuerURL != s.IssuerURL {
-				diff = append(diff, "issuer_url")
+		// Emit per-email plan items so the report is granular.
+		for _, want := range desired {
+			itemName := licIDGuess + "/" + want.Email
+			if prev, has := currentByEmail[want.Email]; has {
+				if prev.Name == want.Name {
+					rep.Items = append(rep.Items, ApplyItem{Kind: KindContact, Name: itemName, Action: ActionNoop})
+				} else {
+					rep.Items = append(rep.Items, ApplyItem{Kind: KindContact, Name: itemName, Action: ActionUpdate, Diff: []string{"name"}})
+				}
+			} else {
+				rep.Items = append(rep.Items, ApplyItem{Kind: KindContact, Name: itemName, Action: ActionCreate})
 			}
-			if prev.ClientID != s.ClientID {
-				diff = append(diff, "client_id")
-			}
-			if prev.Enabled != s.Enabled {
-				diff = append(diff, "enabled")
-			}
-			if !scopesEqual(prev.Scopes, s.Scopes) {
-				diff = append(diff, "scopes")
-			}
-			secretChanged := true
-			if cur, err := crypto.Open(prev.ClientSecretEnc); err == nil {
-				secretChanged = subtle.ConstantTimeCompare(cur, []byte(s.ClientSecret)) != 1
-			}
-			if secretChanged {
-				diff = append(diff, "client_secret")
-			}
-			if len(diff) == 0 {
-				rep.Items = append(rep.Items, ApplyItem{Kind: KindOIDCProvider, Name: s.Name, Action: ActionNoop})
+		}
+		for email, prev := range currentByEmail {
+			if _, kept := desiredByEmail[email]; kept {
 				continue
 			}
-			if opts.DryRun {
-				rep.Items = append(rep.Items, ApplyItem{Kind: KindOIDCProvider, Name: s.Name, Action: ActionUpdate, Diff: diff})
-				continue
-			}
-			// No Update on the store; delete + reinsert preserving ID.
-			if err := st.DeleteOIDCProvider(ctx, prev.ID); err != nil {
-				rep.Errors = append(rep.Errors, ApplyError{Kind: KindOIDCProvider, Name: s.Name, Message: "delete-for-update: " + err.Error()})
-				continue
-			}
-			sealed, err := crypto.Seal([]byte(s.ClientSecret))
-			if err != nil {
-				rep.Errors = append(rep.Errors, ApplyError{Kind: KindOIDCProvider, Name: s.Name, Message: "seal: " + err.Error()})
-				continue
-			}
-			row := &store.OIDCProvider{
-				ID: prev.ID, Name: s.Name, IssuerURL: s.IssuerURL,
-				ClientID: s.ClientID, ClientSecretEnc: sealed,
-				Scopes: s.Scopes, Enabled: s.Enabled,
-			}
-			if err := st.InsertOIDCProvider(ctx, row); err != nil {
-				rep.Errors = append(rep.Errors, ApplyError{Kind: KindOIDCProvider, Name: s.Name, Message: err.Error()})
-				continue
-			}
-			rep.Items = append(rep.Items, ApplyItem{Kind: KindOIDCProvider, Name: s.Name, Action: ActionUpdate, Diff: diff})
-			continue
+			rep.Items = append(rep.Items, ApplyItem{Kind: KindContact, Name: licIDGuess + "/" + prev.Email, Action: ActionDelete})
 		}
 
 		if opts.DryRun {
-			rep.Items = append(rep.Items, ApplyItem{Kind: KindOIDCProvider, Name: s.Name, Action: ActionCreate})
 			continue
 		}
-		sealed, err := crypto.Seal([]byte(s.ClientSecret))
-		if err != nil {
-			rep.Errors = append(rep.Errors, ApplyError{Kind: KindOIDCProvider, Name: s.Name, Message: "seal: " + err.Error()})
-			continue
-		}
-		row := &store.OIDCProvider{
-			ID: uuid.New(), Name: s.Name, IssuerURL: s.IssuerURL,
-			ClientID: s.ClientID, ClientSecretEnc: sealed,
-			Scopes: s.Scopes, Enabled: s.Enabled,
-		}
-		if err := st.InsertOIDCProvider(ctx, row); err != nil {
-			rep.Errors = append(rep.Errors, ApplyError{Kind: KindOIDCProvider, Name: s.Name, Message: err.Error()})
-			continue
-		}
-		rep.Items = append(rep.Items, ApplyItem{Kind: KindOIDCProvider, Name: s.Name, Action: ActionCreate})
-	}
-
-	if opts.Prune {
-		for _, prev := range existing {
-			if _, kept := seen[prev.Name]; kept {
-				continue
-			}
-			if opts.DryRun {
-				rep.Items = append(rep.Items, ApplyItem{Kind: KindOIDCProvider, Name: prev.Name, Action: ActionDelete})
-				continue
-			}
-			if err := st.DeleteOIDCProvider(ctx, prev.ID); err != nil {
-				rep.Errors = append(rep.Errors, ApplyError{Kind: KindOIDCProvider, Name: prev.Name, Message: "prune: " + err.Error()})
-				continue
-			}
-			rep.Items = append(rep.Items, ApplyItem{Kind: KindOIDCProvider, Name: prev.Name, Action: ActionDelete})
+		if err := st.ReplaceManifestContactsForLicense(ctx, licRowID, desired); err != nil {
+			rep.Errors = append(rep.Errors, ApplyError{
+				Kind: KindContact, Name: licIDGuess, Message: err.Error(),
+			})
 		}
 	}
-	return nil
+	return touched
 }
 
-func scopesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	aa := append([]string(nil), a...)
-	bb := append([]string(nil), b...)
-	sort.Strings(aa)
-	sort.Strings(bb)
-	return stringSliceEqual(aa, bb)
-}
-
-// --- static admins ---------------------------------------------------------
-
-// staticAdminSource marks rows owned by the manifest layer; only rows with
-// this source value are touched by reconcile/prune. Operators manually
-// inserted rows with a different source (or env-var entries from
-// cfg.StaticAdmins, which never hit this table) stay untouched.
-const staticAdminSource = "manifest"
-
-func reconcileStaticAdmins(
+// pruneContacts clears manifest-owned contacts for licenses that exist in the
+// DB as manifest-managed but were absent from this apply. UI contacts on the
+// same license (source='') are preserved.
+func pruneContacts(
 	ctx context.Context,
 	st store.DataStore,
-	specs []StaticAdminSpec,
+	existingLicenses []store.License,
+	touched map[uuid.UUID]struct{},
 	opts Options,
 	rep *ApplyReport,
-) error {
-	existing, err := st.ListStaticAdmins(ctx)
-	if err != nil {
-		return fmt.Errorf("list static admins: %w", err)
-	}
-	byEmail := make(map[string]store.StaticAdmin, len(existing))
-	for _, sa := range existing {
-		byEmail[strings.ToLower(sa.Email)] = sa
-	}
-	seen := make(map[string]struct{}, len(specs))
-
-	for _, s := range specs {
-		email := strings.ToLower(strings.TrimSpace(s.Email))
-		if email == "" {
-			rep.Errors = append(rep.Errors, ApplyError{Kind: KindStaticAdmin, Message: "email is required"})
+) {
+	for _, lic := range existingLicenses {
+		if _, t := touched[lic.ID]; t {
 			continue
 		}
-		if _, dup := seen[email]; dup {
-			rep.Errors = append(rep.Errors, ApplyError{Kind: KindStaticAdmin, Name: email, Message: "duplicate email in manifest"})
+		if lic.Source != sourceManifest {
 			continue
 		}
-		seen[email] = struct{}{}
-		if s.Password == "" {
-			rep.Errors = append(rep.Errors, ApplyError{Kind: KindStaticAdmin, Name: email, Message: "password is required (set password or passwordFromEnv)"})
+		current, err := st.ListManifestContactsForLicense(ctx, lic.ID)
+		if err != nil {
+			rep.Errors = append(rep.Errors, ApplyError{Kind: KindContact, Name: lic.LicenseID, Message: "list-for-prune: " + err.Error()})
 			continue
 		}
-
-		prev, exists := byEmail[email]
-		if exists {
-			// Compare by VerifyPassword — same plaintext yields a noop, new
-			// plaintext gets re-hashed.
-			if auth.VerifyPassword(prev.PasswordHash, s.Password) == nil {
-				rep.Items = append(rep.Items, ApplyItem{Kind: KindStaticAdmin, Name: email, Action: ActionNoop})
-				continue
-			}
-			if opts.DryRun {
-				rep.Items = append(rep.Items, ApplyItem{Kind: KindStaticAdmin, Name: email, Action: ActionUpdate, Diff: []string{"password"}})
-				continue
-			}
-			hash, err := auth.HashPassword(s.Password)
-			if err != nil {
-				rep.Errors = append(rep.Errors, ApplyError{Kind: KindStaticAdmin, Name: email, Message: "hash: " + err.Error()})
-				continue
-			}
-			updated := &store.StaticAdmin{
-				ID: prev.ID, Email: email, PasswordHash: hash, Source: staticAdminSource,
-			}
-			if err := st.UpsertStaticAdmin(ctx, updated); err != nil {
-				rep.Errors = append(rep.Errors, ApplyError{Kind: KindStaticAdmin, Name: email, Message: err.Error()})
-				continue
-			}
-			rep.Items = append(rep.Items, ApplyItem{Kind: KindStaticAdmin, Name: email, Action: ActionUpdate, Diff: []string{"password"}})
+		if len(current) == 0 {
 			continue
+		}
+		for _, c := range current {
+			rep.Items = append(rep.Items, ApplyItem{Kind: KindContact, Name: lic.LicenseID + "/" + c.Email, Action: ActionDelete})
 		}
 		if opts.DryRun {
-			rep.Items = append(rep.Items, ApplyItem{Kind: KindStaticAdmin, Name: email, Action: ActionCreate})
 			continue
 		}
-		hash, err := auth.HashPassword(s.Password)
-		if err != nil {
-			rep.Errors = append(rep.Errors, ApplyError{Kind: KindStaticAdmin, Name: email, Message: "hash: " + err.Error()})
-			continue
-		}
-		row := &store.StaticAdmin{
-			ID: uuid.New(), Email: email, PasswordHash: hash, Source: staticAdminSource,
-		}
-		if err := st.UpsertStaticAdmin(ctx, row); err != nil {
-			rep.Errors = append(rep.Errors, ApplyError{Kind: KindStaticAdmin, Name: email, Message: err.Error()})
-			continue
-		}
-		rep.Items = append(rep.Items, ApplyItem{Kind: KindStaticAdmin, Name: email, Action: ActionCreate})
-	}
-
-	if opts.Prune {
-		for _, prev := range existing {
-			if prev.Source != staticAdminSource {
-				continue
-			}
-			if _, kept := seen[strings.ToLower(prev.Email)]; kept {
-				continue
-			}
-			if opts.DryRun {
-				rep.Items = append(rep.Items, ApplyItem{Kind: KindStaticAdmin, Name: prev.Email, Action: ActionDelete})
-				continue
-			}
-			if err := st.DeleteStaticAdmin(ctx, prev.ID); err != nil {
-				rep.Errors = append(rep.Errors, ApplyError{Kind: KindStaticAdmin, Name: prev.Email, Message: "prune: " + err.Error()})
-				continue
-			}
-			rep.Items = append(rep.Items, ApplyItem{Kind: KindStaticAdmin, Name: prev.Email, Action: ActionDelete})
+		if err := st.ReplaceManifestContactsForLicense(ctx, lic.ID, nil); err != nil {
+			rep.Errors = append(rep.Errors, ApplyError{Kind: KindContact, Name: lic.LicenseID, Message: "prune: " + err.Error()})
 		}
 	}
-	return nil
 }

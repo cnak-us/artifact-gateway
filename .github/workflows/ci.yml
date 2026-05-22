@@ -47,6 +47,11 @@ jobs:
           key: go-mod-${{ hashFiles('go.sum') }}
           restore-keys: go-mod-
 
+      - name: Stub UI dist for embed
+        run: |
+          mkdir -p ui/dist
+          echo "<!-- ci stub -->" > ui/dist/index.html
+
       - name: go vet
         run: go vet ./...
 
@@ -90,6 +95,11 @@ jobs:
           path: ~/go/pkg/mod
           key: go-mod-${{ hashFiles('go.sum') }}
           restore-keys: go-mod-
+
+      - name: Stub UI dist for embed
+        run: |
+          mkdir -p ui/dist
+          echo "<!-- ci stub -->" > ui/dist/index.html
 
       - name: go test
         env:

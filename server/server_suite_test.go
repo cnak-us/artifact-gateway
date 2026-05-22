@@ -2,7 +2,6 @@ package server_test
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -228,8 +227,14 @@ func (*fakeStore) DeleteRootKey(context.Context, uuid.UUID) error              {
 func (*fakeStore) ListContactsForLicense(context.Context, uuid.UUID) ([]store.LicenseContact, error) {
 	panic("unused")
 }
+func (*fakeStore) ListManifestContactsForLicense(context.Context, uuid.UUID) ([]store.LicenseContact, error) {
+	panic("unused")
+}
 func (*fakeStore) AddContact(context.Context, *store.LicenseContact) error { panic("unused") }
 func (*fakeStore) RemoveContact(context.Context, uuid.UUID, string) error  { panic("unused") }
+func (*fakeStore) ReplaceManifestContactsForLicense(context.Context, uuid.UUID, []store.LicenseContact) error {
+	panic("unused")
+}
 func (*fakeStore) FindLicensesByContactEmail(context.Context, string) ([]store.License, error) {
 	panic("unused")
 }
@@ -247,7 +252,3 @@ func (*fakeStore) Close() {}
 
 // Compile-time check: fakeStore satisfies store.DataStore.
 var _ store.DataStore = (*fakeStore)(nil)
-
-// ensureNotFoundIs is a tiny helper for tests that want to assert the error
-// is store.ErrNotFound (works through wrapping).
-func ensureNotFoundIs(err error) bool { return errors.Is(err, store.ErrNotFound) }

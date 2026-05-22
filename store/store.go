@@ -70,8 +70,11 @@ type UpstreamCredential struct {
 	// fields without a migration.
 	IssuerConfigJSON []byte
 	LastUsedAt       *time.Time
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	// Source tags the row owner: '' (legacy / admin-UI-created) or 'manifest'
+	// (manifest-reconciler-owned). Prune passes only touch 'manifest' rows.
+	Source    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 type Package struct {
@@ -92,8 +95,12 @@ type Package struct {
 	GitHubRepo     string // "owner/repo" — required when Source = "github-release"
 	ReleasePattern string // "latest", a literal tag, or a semver constraint (caller-interpreted)
 	AssetPattern   string // glob like "cnak-*-linux-amd64*"
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// ManagedBy tags the row owner: '' (legacy / admin-UI-created) or 'manifest'
+	// (manifest-reconciler-owned). Named separately from Source (which selects
+	// oci vs github-release behavior) to avoid overloading a single column.
+	ManagedBy string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 type License struct {
@@ -105,8 +112,11 @@ type License struct {
 	ExpiresAt    *time.Time
 	LicBlob      string // raw .lic; re-verified on each token mint
 	RevokedAt    *time.Time
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// Source tags the row owner: '' (legacy / admin-UI-created) or 'manifest'
+	// (manifest-reconciler-owned). Prune passes only touch 'manifest' rows.
+	Source    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // Branding is the admin-editable white-label override stored in the singleton
@@ -150,6 +160,9 @@ type LicenseContact struct {
 	LicenseID uuid.UUID
 	Email     string // canonical-lowered before write; CITEXT makes lookups case-insensitive
 	Name      string
+	// Source tags the row owner: '' (legacy / admin-UI-created) or 'manifest'
+	// (manifest-reconciler-owned). Prune passes only touch 'manifest' rows.
+	Source    string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -249,8 +262,10 @@ type DataStore interface {
 	// ListContactsForLicense returns contacts ordered by created_at ASC; AddContact upserts
 	// by (license_id, email) (lowercased) and preserves a non-empty name on conflict.
 	ListContactsForLicense(ctx context.Context, licenseID uuid.UUID) ([]LicenseContact, error)
+	ListManifestContactsForLicense(ctx context.Context, licenseID uuid.UUID) ([]LicenseContact, error)
 	AddContact(ctx context.Context, c *LicenseContact) error
 	RemoveContact(ctx context.Context, licenseID uuid.UUID, email string) error
+	ReplaceManifestContactsForLicense(ctx context.Context, licenseID uuid.UUID, contacts []LicenseContact) error
 	FindLicensesByContactEmail(ctx context.Context, email string) ([]License, error)
 
 	// root keys (signing keys for license issuance)

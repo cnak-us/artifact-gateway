@@ -5,6 +5,11 @@
 // The CR shape mirrors a Kubernetes-style resource so admins can apply the
 // same YAML through the UI, via `kubectl create -f`-style tooling, or mount
 // it at startup via the CONFIG_FILE env var.
+//
+// Auth is intentionally NOT part of the CR — OIDC providers and the bootstrap
+// admin are configured at deploy-time via env vars (DEX_*, ADMIN_BOOTSTRAP_*)
+// so the CR stays focused on data-plane configuration (credentials, packages,
+// licenses, grants) that operators legitimately edit at runtime.
 package apply
 
 // APIVersion is the only apiVersion this package accepts.
@@ -27,34 +32,14 @@ type Metadata struct {
 }
 
 // ManifestSpec holds every kind of resource the gateway reconciles.
+//
+// Auth (oidcProviders, staticAdmins) is deliberately omitted — see package
+// doc comment.
 type ManifestSpec struct {
-	StaticAdmins        []StaticAdminSpec        `yaml:"staticAdmins,omitempty"        json:"staticAdmins,omitempty"`
-	OIDCProviders       []OIDCProviderSpec       `yaml:"oidcProviders,omitempty"       json:"oidcProviders,omitempty"`
 	UpstreamCredentials []UpstreamCredentialSpec `yaml:"upstreamCredentials,omitempty" json:"upstreamCredentials,omitempty"`
 	Packages            []PackageSpec            `yaml:"packages,omitempty"            json:"packages,omitempty"`
 	Licenses            []LicenseSpec            `yaml:"licenses,omitempty"            json:"licenses,omitempty"`
 	Grants              []GrantSpec              `yaml:"grants,omitempty"              json:"grants,omitempty"`
-}
-
-// StaticAdminSpec is a break-glass admin written to the static_admins table.
-// Either Password or PasswordFromEnv must be set; resolve.go drains
-// PasswordFromEnv into Password before the manifest reaches the reconciler.
-type StaticAdminSpec struct {
-	Email            string `yaml:"email"                      json:"email"`
-	Password         string `yaml:"password,omitempty"         json:"password,omitempty"`
-	PasswordFromEnv  string `yaml:"passwordFromEnv,omitempty"  json:"passwordFromEnv,omitempty"`
-}
-
-// OIDCProviderSpec declares an OIDC IdP. ClientSecret may be inline or read
-// from the named env var via ClientSecretFromEnv (which resolve.go consumes).
-type OIDCProviderSpec struct {
-	Name                 string   `yaml:"name"                          json:"name"`
-	IssuerURL            string   `yaml:"issuerUrl"                     json:"issuerUrl"`
-	ClientID             string   `yaml:"clientId"                      json:"clientId"`
-	ClientSecret         string   `yaml:"clientSecret,omitempty"        json:"clientSecret,omitempty"`
-	ClientSecretFromEnv  string   `yaml:"clientSecretFromEnv,omitempty" json:"clientSecretFromEnv,omitempty"`
-	Scopes               []string `yaml:"scopes,omitempty"              json:"scopes,omitempty"`
-	Enabled              bool     `yaml:"enabled"                       json:"enabled"`
 }
 
 // UpstreamCredentialSpec is a stored PAT used to pull from an upstream
@@ -93,10 +78,19 @@ type PackageSpec struct {
 	InstallInstructionsMD string `yaml:"installInstructionsMD,omitempty"   json:"installInstructionsMD,omitempty"`
 }
 
-// LicenseSpec is a raw .lic blob. The cnaklic license ID is extracted by the
-// reconciler from the signed payload.
+// LicenseSpec is a raw .lic blob plus optional manifest-managed metadata such
+// as the federated-login contact allowlist. The cnaklic license ID is
+// extracted by the reconciler from the signed payload.
 type LicenseSpec struct {
-	LicBlob string `yaml:"licBlob" json:"licBlob"`
+	LicBlob  string        `yaml:"licBlob"            json:"licBlob"`
+	Contacts []ContactSpec `yaml:"contacts,omitempty" json:"contacts,omitempty"`
+}
+
+// ContactSpec is one federated-login contact for a license. Email is matched
+// case-insensitively after canonical-lowering at apply time.
+type ContactSpec struct {
+	Email string `yaml:"email"          json:"email"`
+	Name  string `yaml:"name,omitempty" json:"name,omitempty"`
 }
 
 // GrantSpec ties a license (by cnaklic licenseID, NOT the DB row UUID) to a

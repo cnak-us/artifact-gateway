@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import {
   MdArrowBack, MdInventory2, MdLayers, MdTerminal, MdOpenInNew,
   MdDownload, MdExpandMore, MdExpandLess, MdContentCopy, MdCheck, MdCloudDownload,
+  MdVpnKey,
 } from 'react-icons/md';
 import { catalog, ApiError } from '../../api/client.js';
 import { useCatalogAuth } from '../../contexts/CatalogAuthContext.jsx';
@@ -21,17 +22,19 @@ function asArray(v, key) {
 }
 
 const kindIcon = {
-  container: MdInventory2,
-  helm:      MdLayers,
-  binary:    MdTerminal,
-  compose:   MdCloudDownload,
+  container:    MdInventory2,
+  helm:         MdLayers,
+  binary:       MdTerminal,
+  compose:      MdCloudDownload,
+  'k8s-secret': MdVpnKey,
 };
 
 const TAB_LABEL = {
-  container: 'Container',
-  helm:      'Helm',
-  binary:    'Binary',
-  compose:   'Compose bundle',
+  container:    'Container',
+  helm:         'Helm',
+  binary:       'Binary',
+  compose:      'Compose bundle',
+  'k8s-secret': 'K8s pull secret',
 };
 
 export default function CatalogPackage() {
@@ -50,7 +53,14 @@ export default function CatalogPackage() {
     }).catch(() => { /* fall back to default */ });
   }, [slug]);
 
-  const tokenId = session?.token_id || session?.tokenId || '<your-token-id>';
+  // Raw identity from the catalog session. For Basic-auth customers this is
+  // the 20-char token id (usable as a registry username). For OIDC contacts
+  // the server stamps the user's email into this field — emails are NOT
+  // valid registry usernames, so we hand the snippets a placeholder instead
+  // and surface a callout pointing the user at the Credentials page.
+  const rawSessionId = session?.token_id || session?.tokenId || '';
+  const tokenId = effectiveDockerUsername(rawSessionId);
+  const needsRealToken = tokenId === TOKEN_PLACEHOLDER;
 
   if (err) {
     return (
@@ -98,9 +108,20 @@ export default function CatalogPackage() {
       </header>
 
       {isGH ? (
-        <DownloadsSection slug={pkg.slug} hostname={hostname} tokenId={tokenId} />
+        <DownloadsSection
+          slug={pkg.slug}
+          hostname={hostname}
+          tokenId={tokenId}
+          needsRealToken={needsRealToken}
+        />
       ) : (
-        <InstallSection pkg={pkg} hostname={hostname} tokenId={tokenId} slug={slug} />
+        <InstallSection
+          pkg={pkg}
+          hostname={hostname}
+          tokenId={tokenId}
+          needsRealToken={needsRealToken}
+          slug={slug}
+        />
       )}
 
       {pkg.release_notes_url && (
@@ -131,7 +152,7 @@ export default function CatalogPackage() {
 
 // --- OCI install section (unchanged tab UX) ------------------------------
 
-function InstallSection({ pkg, hostname, tokenId, slug }) {
+function InstallSection({ pkg, hostname, tokenId, needsRealToken, slug }) {
   const [tags, setTags] = useState(null);
   const [tagsErr, setTagsErr] = useState(null);
   const [selectedTag, setSelectedTag] = useState(null);
@@ -159,7 +180,7 @@ function InstallSection({ pkg, hostname, tokenId, slug }) {
     [hostname, pkg, tag, tokenId],
   );
 
-  const tabs = pkg.kind === 'helm' ? ['helm', 'container'] : pkg.kind === 'binary' ? ['binary'] : ['container', 'helm'];
+  const tabs = pkg.kind === 'helm' ? ['helm', 'container', 'k8s-secret'] : pkg.kind === 'binary' ? ['binary'] : ['container', 'helm', 'k8s-secret'];
   const tabSet = new Set(tabs);
   if (!tabSet.has(pkg.kind)) tabs.unshift(pkg.kind);
 
@@ -167,6 +188,8 @@ function InstallSection({ pkg, hostname, tokenId, slug }) {
     <>
       <section className="mb-10">
         <h2 className="text-lg font-semibold mb-3">Install</h2>
+
+        {needsRealToken && <TokenIdCallout />}
 
         <div className="border-b border-g-border-weak flex items-center gap-1 mb-4">
           {tabs.map((kind) => (
@@ -233,6 +256,34 @@ function InstallSection({ pkg, hostname, tokenId, slug }) {
   );
 }
 
+// Placeholder shown in snippets when we can't determine a real registry
+// username from the session. OIDC contacts have an email in `token_id`, which
+// is not a valid customer-token row — handing it to `docker login` would 401
+// against `/v2/token`. Customer-token ids minted on the server are
+// 20-char uppercase alphanumeric and never contain "@", so we use the "@"
+// presence as the discriminator (same heuristic CatalogCredentials uses).
+const TOKEN_PLACEHOLDER = '<your-token-id>';
+
+function effectiveDockerUsername(rawId) {
+  if (!rawId || rawId.includes('@')) return TOKEN_PLACEHOLDER;
+  return rawId;
+}
+
+function TokenIdCallout() {
+  return (
+    <div className="mb-4 px-3 py-2 rounded border border-g-border-weak bg-g-secondary text-xs text-g-text-secondary">
+      You're signed in with SSO, which can't be used as a registry login.
+      Generate a customer token from{' '}
+      <Link to="/catalog/credentials" className="text-g-text-link hover:underline">
+        Credentials
+      </Link>{' '}
+      and substitute it for{' '}
+      <code className="px-1 py-0.5 bg-g-primary rounded font-mono text-[11px]">{TOKEN_PLACEHOLDER}</code>{' '}
+      in the snippet below.
+    </div>
+  );
+}
+
 function buildOciSnippets({ hostname, path, tag, tokenId }) {
   if (!path) return {};
   const reg = `${hostname}/${path}`;
@@ -259,12 +310,25 @@ echo "<your secret>" | oras login ${hostname} -u ${tokenId} --password-stdin
 
 # Pull the artifact
 oras pull ${reg}:${tag}`,
+
+    'k8s-secret':
+`# Create an imagePullSecret in your cluster (default namespace).
+# Substitute <your-secret> with the value you used to sign in.
+kubectl create secret docker-registry cnak-pull-secret \\
+  --docker-server=${hostname} \\
+  --docker-username=${tokenId} \\
+  --docker-password='<your-secret>' \\
+  --namespace=default
+
+# Reference it in your pod / helm values as:
+#   imagePullSecrets:
+#     - name: cnak-pull-secret`,
   };
 }
 
 // --- GitHub-release downloads section ------------------------------------
 
-function DownloadsSection({ slug, hostname, tokenId }) {
+function DownloadsSection({ slug, hostname, tokenId, needsRealToken }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
 
@@ -302,6 +366,8 @@ function DownloadsSection({ slug, hostname, tokenId }) {
       </p>
 
       {err && <ErrorBanner error={err} className="mb-3" />}
+
+      {needsRealToken && <TokenIdCallout />}
 
       {releases === null ? (
         <div className="py-8"><Spinner label="Loading releases" /></div>
