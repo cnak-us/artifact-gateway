@@ -44,7 +44,7 @@ HELM_ARGS      ?=
 .DEFAULT_GOAL  := help
 .PHONY: help dev-init dev dev-https dev-dex dev-certs dev-certs-clean dev-stop \
         build build-ui test lint image \
-        compose-up compose-down smoke clean \
+        compose-up compose-down smoke clean reset \
         helm-install helm-upgrade helm-uninstall
 
 ## help: print available targets
@@ -209,6 +209,37 @@ compose-up: ## bring up full stack via docker compose
 ## compose-down: tear down compose stack and DELETE volumes
 compose-down: ## docker compose down -v (DELETES volumes)
 	docker compose down -v
+
+## reset: wipe artifact-gateway DB + registry volumes back to first-boot state.
+##        Refuses to run against a non-local DATABASE_URL. Prompts for typed
+##        confirmation unless CONFIRM=yes is set. Preserves .env secrets
+##        (KEK_BASE64, JWT_SIGNING_KEY, SESSION_SIGNING_KEY) so re-applied
+##        manifests can re-seal credentials with the same key.
+##
+##        After this completes, the next `make dev` will:
+##          - re-run schema migrations on the empty volume
+##          - re-bootstrap the ADMIN_BOOTSTRAP_EMAIL/PASSWORD user
+##          - re-apply CONFIG_FILE if set (e.g. CONFIG_FILE=config/standard.yaml)
+reset: ## DESTRUCTIVE: wipe compose DB+registry volumes and re-bootstrap secrets
+	@DB_URL="$$( ( [ -f $(ENV_FILE) ] && . ./$(ENV_FILE) >/dev/null 2>&1 && echo "$$DATABASE_URL" ) || true )"; \
+	if [ -n "$$DB_URL" ] && ! echo "$$DB_URL" | grep -Eq '@(localhost|127\.0\.0\.1)[:/]'; then \
+		echo "ERROR: refusing to reset — DATABASE_URL in $(ENV_FILE) does not point at localhost."; \
+		echo "       Got: $$DB_URL"; \
+		echo "       Unset DATABASE_URL or repoint at localhost to proceed."; \
+		exit 1; \
+	fi
+	@if [ "$(CONFIRM)" != "yes" ]; then \
+		read -r -p "Type 'reset' to wipe artifact-gateway DB + registry volumes: " ans; \
+		if [ "$$ans" != "reset" ]; then \
+			echo ">>> aborted"; exit 1; \
+		fi; \
+	fi
+	@echo ">>> docker compose down -v (drops postgres + registry volumes)"
+	docker compose down -v
+	@echo ">>> back-filling any blanked secrets in $(ENV_FILE)"
+	$(MAKE) dev-init
+	@echo ">>> reset complete — run 'make dev' to bring the stack back up"
+	@echo "    (set CONFIG_FILE=config/standard.yaml in $(ENV_FILE) to re-seed the catalog)"
 
 ## smoke: end-to-end pull test against the running gateway (see plan §Verification)
 smoke: ## run end-to-end docker/helm/oras smoke pulls

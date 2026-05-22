@@ -117,7 +117,6 @@ function StateConfig() {
   const fileInputRef = useRef(null);
 
   const [editor, setEditor]   = useState('');
-  const [dryRun, setDryRun]   = useState(true);
   const [prune, setPrune]     = useState(false);
   const [busy, setBusy]       = useState(null);     // 'export' | 'dryrun' | 'apply' | null
   const [err, setErr]         = useState(null);
@@ -191,20 +190,19 @@ function StateConfig() {
     setReport(null);
   };
 
-  const runApply = async ({ force_dry_run } = {}) => {
+  const runApply = async ({ dryRun } = {}) => {
     if (!editor.trim()) {
       setErr(new Error('Manifest is empty.'));
       return;
     }
     setErr(null);
-    const effectiveDry = force_dry_run ? true : dryRun;
-    setBusy(effectiveDry ? 'dryrun' : 'apply');
+    setBusy(dryRun ? 'dryrun' : 'apply');
     try {
-      const res = await admin.configApply(editor, { dryRun: effectiveDry, prune });
+      const res = await admin.configApply(editor, { dryRun, prune });
       const items  = asArray(res, 'items');
       const errors = asArray(res, 'errors');
-      setReport({ dry_run: effectiveDry, items, errors });
-      if (effectiveDry) {
+      setReport({ dry_run: dryRun, items, errors });
+      if (dryRun) {
         setLastOkDryHash(editorHash);
         toast.success(
           errors.length
@@ -327,15 +325,6 @@ function StateConfig() {
 
         <div className="px-4 py-3 border-t border-g-border-weak bg-g-secondary/40 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-5 text-sm">
-            <label className="inline-flex items-center gap-2 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                className="accent-g-accent-main"
-                checked={dryRun}
-                onChange={(e) => setDryRun(e.target.checked)}
-              />
-              <span className="text-g-text">Dry run</span>
-            </label>
             <label
               className="inline-flex items-center gap-2 cursor-pointer select-none"
               title="Removes anything not in the manifest. Use carefully."
@@ -365,7 +354,7 @@ function StateConfig() {
               icon={<MdPlayArrow />}
               loading={busy === 'dryrun'}
               disabled={busy !== null || !editor.trim()}
-              onClick={() => runApply({ force_dry_run: true })}
+              onClick={() => runApply({ dryRun: true })}
             >
               Dry run
             </Button>
@@ -374,7 +363,7 @@ function StateConfig() {
               icon={<MdRocketLaunch />}
               loading={busy === 'apply'}
               disabled={applyDisabled}
-              onClick={() => runApply({ force_dry_run: false })}
+              onClick={() => runApply({ dryRun: false })}
               title={!dryRunIsFresh ? 'Run a successful dry run on the current editor contents first.' : ''}
             >
               Apply

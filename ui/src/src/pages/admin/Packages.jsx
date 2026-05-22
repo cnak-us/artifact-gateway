@@ -50,10 +50,8 @@ const OCI_CRED_KINDS = new Set([
   'ecr', 'gar', 'acr-aad',
 ]);
 
-const OCI_KIND_OPTS = [
-  { value: 'container', label: 'container' },
-  { value: 'helm',      label: 'helm' },
-  { value: 'binary',    label: 'binary' },
+const KIND_SUGGESTIONS = [
+  'container', 'helm', 'binary', 'cli', 'zip', 'archive', 'image', 'chart',
 ];
 
 const GH_REPO_RE = /^[^/\s]+\/[^/\s]+$/;
@@ -228,7 +226,6 @@ function PackageModal({ open, onClose, initial, creds, onSaved }) {
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
-  // When the source changes, snap kind + cleared-out fields to sensible defaults.
   const setSource = (e) => {
     const next = e.target.value;
     setForm((f) => {
@@ -236,7 +233,6 @@ function PackageModal({ open, onClose, initial, creds, onSaved }) {
         return {
           ...f,
           source: next,
-          kind: f.kind && f.kind !== 'container' && f.kind !== 'helm' ? f.kind : 'binary',
           release_pattern: f.release_pattern || 'latest',
           asset_pattern: f.asset_pattern || '*',
           upstream_credential_id: '',
@@ -245,7 +241,6 @@ function PackageModal({ open, onClose, initial, creds, onSaved }) {
       return {
         ...f,
         source: next,
-        kind: f.kind && f.kind !== 'compose' ? f.kind : 'container',
         upstream_credential_id: '',
       };
     });
@@ -354,19 +349,18 @@ function PackageModal({ open, onClose, initial, creds, onSaved }) {
           hint="Slug-style path under the gateway hostname (no leading slash). Used in download URLs."
         />
 
-        {isRelease ? (
-          <Select
-            label="Kind *"
-            value={form.kind || 'binary'}
-            onChange={set('kind')}
-            options={[
-              { value: 'binary', label: 'binary' },
-              { value: 'compose', label: 'compose' },
-            ]}
-          />
-        ) : (
-          <Select label="Kind *" value={form.kind} onChange={set('kind')} options={OCI_KIND_OPTS} />
-        )}
+        <Input
+          label="Kind *"
+          value={form.kind || ''}
+          onChange={set('kind')}
+          placeholder={isRelease ? 'binary' : 'container'}
+          list="package-kind-suggestions"
+          required
+          hint="Free-form label for this artifact. Pick a suggestion or type your own."
+        />
+        <datalist id="package-kind-suggestions">
+          {KIND_SUGGESTIONS.map((k) => <option key={k} value={k} />)}
+        </datalist>
 
         {isRelease ? (
           <>

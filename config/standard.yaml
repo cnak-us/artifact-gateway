@@ -1,0 +1,204 @@
+# Standard ArtifactGatewayConfig for the CNAK product line.
+#
+# Mount this at startup via `CONFIG_FILE=config/standard.yaml` (or apply through
+# the admin UI) to populate the catalog with every artifact published by the
+# cnak/ codebase: container images, the Helm chart, per-platform binaries, and
+# the Compose bundle.
+#
+# Customer state (licenses, grants, customer_tokens) is intentionally NOT in
+# this file — those are per-customer and live in a separate manifest applied
+# after this one.
+#
+# Required environment for `Resolve` to drain *FromEnv fields:
+#   GHCR_PAT         classic PAT, scope: read:packages
+#   GITHUB_API_PAT   classic PAT, scope: repo (private) or public_repo
+#
+# Both PATs MUST be issued against an account or org with read access to
+# github.com/cnak-us/* (cnak, cnak-chart, federation, gateway).
+---
+apiVersion: artifact-gateway.cnak.us/v1
+kind: ArtifactGatewayConfig
+metadata:
+  name: cnak-standard
+
+spec:
+  # ---------------------------------------------------------------------------
+  # Upstream credentials.
+  #
+  # Two creds: one for OCI pulls from ghcr.io (images + the Helm chart), and
+  # one for GitHub Releases REST API (binaries + compose bundle). They are
+  # kept separate so the API PAT can carry the wider `repo` scope without
+  # forcing it onto the OCI-pull credential.
+  # ---------------------------------------------------------------------------
+  upstreamCredentials:
+    - name: cnak-ghcr
+      kind: ghcr
+      username: cnak-us-bot
+      patFromEnv: GHCR_PAT
+
+    - name: cnak-github-api
+      kind: github-api
+      username: cnak-us-bot
+      patFromEnv: GITHUB_API_PAT
+
+  # ---------------------------------------------------------------------------
+  # Packages.
+  #
+  # Slugs are stable identifiers customers consume:
+  #   docker pull <gateway>/cnak/backend:<tag>
+  #   helm pull oci://<gateway>/cnak/chart --version <tag>
+  #   curl -u <tid>:<secret> https://<gateway>/api/v1/download/cnak-cli/latest
+  #
+  # `path` is the customer-visible namespace under /v2/. We mirror the upstream
+  # ghcr layout so existing CNAK docs and Compose files keep working when the
+  # registry host is swapped for the gateway.
+  # ---------------------------------------------------------------------------
+  packages:
+
+    # ----- core platform images (cnak/) -------------------------------------
+    - slug: cnak-backend
+      source: oci
+      path: cnak/backend
+      upstreamRepo: ghcr.io/cnak-us/cnak/backend
+      upstreamCredential: cnak-ghcr
+      kind: container
+      displayName: CNAK Backend
+      description: Core REST API, CoT message handling, NATS management, OIDC auth.
+
+    - slug: cnak-frontend
+      source: oci
+      path: cnak/frontend
+      upstreamRepo: ghcr.io/cnak-us/cnak/frontend
+      upstreamCredential: cnak-ghcr
+      kind: container
+      displayName: CNAK Frontend
+      description: React UI with MapLibre map, military symbology, SSE streaming.
+
+    - slug: cnak-nats-bridge
+      source: oci
+      path: cnak/nats-bridge
+      upstreamRepo: ghcr.io/cnak-us/cnak/nats-bridge
+      upstreamCredential: cnak-ghcr
+      kind: container
+      displayName: CNAK NATS Bridge
+      description: CEL-based message routing engine for federation peers.
+
+    - slug: cnak-geofence-monitor
+      source: oci
+      path: cnak/geofence-monitor
+      upstreamRepo: ghcr.io/cnak-us/cnak/geofence-monitor
+      upstreamCredential: cnak-ghcr
+      kind: container
+      displayName: CNAK Geofence Monitor
+      description: Geographic region alerting service.
+
+    - slug: cnak-trajectory-analysis
+      source: oci
+      path: cnak/trajectory-analysis
+      upstreamRepo: ghcr.io/cnak-us/cnak/trajectory-analysis
+      upstreamCredential: cnak-ghcr
+      kind: container
+      displayName: CNAK Trajectory Analysis
+      description: Speed, heading, and anomaly analysis on track history.
+
+    - slug: cnak-track-prediction
+      source: oci
+      path: cnak/track-prediction
+      upstreamRepo: ghcr.io/cnak-us/cnak/track-prediction
+      upstreamCredential: cnak-ghcr
+      kind: container
+      displayName: CNAK Track Prediction
+      description: Linear and circular position prediction.
+
+    - slug: cnak-ml-prediction-service
+      source: oci
+      path: cnak/ml-prediction-service
+      upstreamRepo: ghcr.io/cnak-us/cnak/ml-prediction-service
+      upstreamCredential: cnak-ghcr
+      kind: container
+      displayName: CNAK ML Prediction Service
+      description: Python ML-based trajectory prediction.
+
+    - slug: cnak-ais-integration
+      source: oci
+      path: cnak/ais-integration
+      upstreamRepo: ghcr.io/cnak-us/cnak/ais-integration
+      upstreamCredential: cnak-ghcr
+      kind: container
+      displayName: CNAK AIS Integration
+      description: AISStream.io vessel data ingestion.
+
+    - slug: cnak-development-service
+      source: oci
+      path: cnak/development-service
+      upstreamRepo: ghcr.io/cnak-us/cnak/development-service
+      upstreamCredential: cnak-ghcr
+      kind: container
+      displayName: CNAK Development Service
+      description: Sandboxed Python CoT scripting environment.
+
+    - slug: cnak-sensor-simulator
+      source: oci
+      path: cnak/sensor-simulator
+      upstreamRepo: ghcr.io/cnak-us/cnak/sensor-simulator
+      upstreamCredential: cnak-ghcr
+      kind: container
+      displayName: CNAK Sensor Simulator
+      description: Test data generator for CoT ingest paths.
+
+    - slug: cnak-ai-advisor
+      source: oci
+      path: cnak/ai-advisor
+      upstreamRepo: ghcr.io/cnak-us/cnak/ai-advisor
+      upstreamCredential: cnak-ghcr
+      kind: container
+      displayName: CNAK AI Advisor
+      description: LLM-powered operational assistant.
+
+    # ----- Helm chart (OCI artifact, published from cnak-chart/) ------------
+    - slug: cnak-chart
+      source: oci
+      path: cnak/chart
+      upstreamRepo: ghcr.io/cnak-us/cnak/chart
+      upstreamCredential: cnak-ghcr
+      kind: helm
+      displayName: CNAK Helm Chart
+      description: Production Helm chart bundling all CNAK services with NATS, Dex, Prometheus, Grafana.
+      installInstructionsMD: |
+        ```bash
+        helm registry login <gateway-host> -u $TID -p $SECRET
+        helm pull oci://<gateway-host>/cnak/chart --version <tag>
+        ```
+
+    # ----- GitHub Release binaries (cnak-us/cnak) ---------------------------
+    # release-binary.yml ships cnak + cnakcli for linux/darwin/windows ×
+    # amd64/arm64 plus checksums; release-compose.yml ships cnak-compose.tar.gz.
+    - slug: cnak-cli
+      source: github-release
+      upstreamCredential: cnak-github-api
+      githubRepo: cnak-us/cnak
+      releasePattern: latest
+      assetPattern: cnakcli-*
+      kind: cli
+      displayName: cnak CLI (cnakcli)
+      description: Operator CLI for managing CNAK deployments, plugins, and federation.
+
+    - slug: cnak-binary
+      source: github-release
+      upstreamCredential: cnak-github-api
+      githubRepo: cnak-us/cnak
+      releasePattern: latest
+      assetPattern: cnak-*
+      kind: binary
+      displayName: cnak (binary mode)
+      description: Standalone CNAK binary with embedded NATS + frontend. For edge / air-gapped deployments.
+
+    - slug: cnak-compose
+      source: github-release
+      upstreamCredential: cnak-github-api
+      githubRepo: cnak-us/cnak
+      releasePattern: latest
+      assetPattern: cnak-compose.tar.gz
+      kind: compose
+      displayName: CNAK Compose Bundle
+      description: Docker Compose bundle with NATS, Dex, Prometheus, Grafana provisioning.

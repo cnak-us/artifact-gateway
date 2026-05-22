@@ -697,7 +697,7 @@ func probeOCITagList(r *http.Request, pkg *store.Package, cred *store.UpstreamCr
 	if host == "" {
 		return probeResult{OK: false, Method: http.MethodGet, Summary: "no base URL resolved for credential"}
 	}
-	url := fmt.Sprintf("%s/v2/%s/tags/list?n=10", host, pkg.UpstreamRepo)
+	url := fmt.Sprintf("%s/v2/%s/tags/list?n=100", host, pkg.UpstreamRepo)
 	client := newProbeClientForCred(cred)
 	start := time.Now()
 

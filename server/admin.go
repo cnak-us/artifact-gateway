@@ -704,6 +704,9 @@ func patchPackage(d AdminDeps) http.HandlerFunc {
 		if in.AssetPattern != "" {
 			existing.AssetPattern = in.AssetPattern
 		}
+		if in.Kind != "" {
+			existing.Kind = in.Kind
+		}
 		if err := d.Store.UpdatePackage(r.Context(), existing); err != nil {
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
 			return

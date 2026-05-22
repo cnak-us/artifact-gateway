@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -128,7 +129,22 @@ func main() {
 
 	// ---- auditor + license cache + verifier ----
 	auditor := audit.NewAuditor(nc, st, logger)
-	verifier := license.NewVerifier()
+	verifier := license.NewStoreVerifier(func() []ed25519.PublicKey {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		rows, err := st.ListRootKeys(ctx)
+		if err != nil {
+			logger.Warn("list root keys for verifier failed", "err", err)
+			return nil
+		}
+		out := make([]ed25519.PublicKey, 0, len(rows))
+		for i := range rows {
+			if len(rows[i].PublicKey) == ed25519.PublicKeySize {
+				out = append(out, ed25519.PublicKey(rows[i].PublicKey))
+			}
+		}
+		return out
+	})
 	licCache := license.NewCache(nc, logger)
 
 	// ---- OIDC ----

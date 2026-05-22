@@ -167,6 +167,7 @@ jobs:
         run: |
           VERSION="${{ needs.setup.outputs.version_num }}"
           CHART_NAME=$(awk '/^name:/ {print $2; exit}' chart/Chart.yaml)
+          mkdir -p /tmp/verify
           helm pull "oci://${{ env.CHART_OCI_REPO }}/${CHART_NAME}" --version "$VERSION" --destination /tmp/verify
           ls -lh /tmp/verify
 

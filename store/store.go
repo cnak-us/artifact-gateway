@@ -80,7 +80,7 @@ type Package struct {
 	Path                  string // /v2 repo path (e.g. cnak-us/cnak-core)
 	UpstreamRepo          string // full ghcr path
 	UpstreamCredentialID  uuid.UUID
-	Kind                  string // container | helm | binary
+	Kind                  string // free-text display label; common values: container, helm, binary, cli, zip, archive, image, chart
 	DisplayName           string
 	Description           string
 	ReleaseNotesURL       string

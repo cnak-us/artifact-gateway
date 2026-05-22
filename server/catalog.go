@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -322,9 +324,22 @@ func handleCatalogListPackages(d CatalogDeps) http.HandlerFunc {
 	}
 }
 
+// slugParam reads the {slug} URL parameter and percent-decodes it. Package
+// slugs contain slashes (e.g. "containers/backend"); the catalog SPA
+// encodes them as "%2F" in URLs, and chi preserves the encoding in
+// URLParam. Without this decode, GetPackageBySlug misses on the literal
+// "containers%2Fbackend" string and the handler 404s.
+func slugParam(r *http.Request) string {
+	raw := chi.URLParam(r, "slug")
+	if dec, err := url.PathUnescape(raw); err == nil {
+		return dec
+	}
+	return raw
+}
+
 func handleCatalogGetPackage(d CatalogDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		slug := chi.URLParam(r, "slug")
+		slug := slugParam(r)
 		id := catalogFromCtx(r.Context())
 		lic, _, err := d.resolveLicenseForSession(r.Context(), id)
 		if err != nil {
@@ -352,7 +367,7 @@ func handleCatalogGetPackage(d CatalogDeps) http.HandlerFunc {
 // render the latest 10 tags inline on the package detail page.
 func handleCatalogListTags(d CatalogDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		slug := chi.URLParam(r, "slug")
+		slug := slugParam(r)
 		id := catalogFromCtx(r.Context())
 		lic, _, err := d.resolveLicenseForSession(r.Context(), id)
 		if err != nil {
@@ -387,18 +402,34 @@ func handleCatalogListTags(d CatalogDeps) http.HandlerFunc {
 			return
 		}
 		upstreamURL := host + "/v2/" + pkg.UpstreamRepo + "/tags/list"
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
-		if err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, "build upstream request: "+err.Error())
-			return
-		}
-		req.SetBasicAuth(cred.Username, string(pat))
-		req.Header.Set("Accept", "application/json")
 
-		resp, err := d.Upstream.Client.Do(req)
+		// Same Basic-then-bearer dance as the admin probe (admin_probe.go):
+		// ghcr.io rejects Basic on tags/list and returns a placeholder Bearer
+		// challenge whose scope we override with the actual repo scope before
+		// minting. Harbor/Gitea/oci-basic registries return 2xx on the first
+		// Basic call and never get to the retry.
+		basic := "Basic " + base64.StdEncoding.EncodeToString([]byte(cred.Username+":"+string(pat)))
+		resp, err := tagListGet(r.Context(), d.Upstream.Client, upstreamURL, basic)
 		if err != nil {
 			writeJSONErr(w, http.StatusBadGateway, "upstream error: "+err.Error())
 			return
+		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			if ch := parseBearerChallenge(resp.Header.Get("Www-Authenticate")); ch != nil {
+				_ = resp.Body.Close()
+				ch.Scope = fmt.Sprintf("repository:%s:pull", pkg.UpstreamRepo)
+				bearer := &BearerExchangeAuthenticator{HTTPClient: d.Upstream.Client}
+				token, _, mintErr := bearer.mintToken(r.Context(), ch, cred, []byte(pat))
+				if mintErr != nil {
+					writeJSONErr(w, http.StatusBadGateway, "bearer exchange failed: "+mintErr.Error())
+					return
+				}
+				resp, err = tagListGet(r.Context(), d.Upstream.Client, upstreamURL, "Bearer "+token)
+				if err != nil {
+					writeJSONErr(w, http.StatusBadGateway, "retry-with-bearer failed: "+err.Error())
+					return
+				}
+			}
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode >= 400 {
@@ -409,6 +440,19 @@ func handleCatalogListTags(d CatalogDeps) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.Copy(w, resp.Body)
 	}
+}
+
+func tagListGet(ctx context.Context, client *http.Client, url, authHeader string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "artifact-gateway/1.0")
+	return client.Do(req)
 }
 
 // --- helpers ----------------------------------------------------------------

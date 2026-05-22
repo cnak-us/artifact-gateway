@@ -56,7 +56,9 @@ CREATE TABLE IF NOT EXISTS packages (
     path                     TEXT NOT NULL UNIQUE,
     upstream_repo            TEXT NOT NULL,
     upstream_credential_id   UUID NOT NULL REFERENCES upstream_credentials(id) ON DELETE RESTRICT,
-    kind                     TEXT NOT NULL CHECK (kind IN ('container','helm','binary')),
+    -- kind is a free-text display label only; no Go code switches on it for behavior.
+    -- Common values: container, helm, binary, cli, zip, archive, image, chart.
+    kind                     TEXT NOT NULL,
     display_name             TEXT NOT NULL DEFAULT '',
     description              TEXT NOT NULL DEFAULT '',
     release_notes_url        TEXT NOT NULL DEFAULT '',

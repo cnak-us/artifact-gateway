@@ -145,12 +145,16 @@ func (h *downloadsHandler) resolveActor(w http.ResponseWriter, r *http.Request, 
 		h.writeUnauthorized(w, source, "authentication required")
 		return nil, nil, false
 	}
+	// OIDC catalog session: no customer_token row, so resolve the license via
+	// the email→license_contacts mapping the catalog browse flow already uses
+	// (see resolveLicenseForSession). Without this, browser-only customers can
+	// list packages in the catalog but every download click 403s.
 	if s.UserID == uuidNil {
-		// OIDC-only catalog sessions don't have a customer-token row in v1.
-		// Email→license mapping isn't wired yet, so downloads are unavailable.
-		writeJSONErr(w, http.StatusForbidden, "no entitled license for this session")
-		metrics.DownloadsTotal.WithLabelValues(source, "not_entitled").Inc()
-		return nil, nil, false
+		lic, ok := h.loadLicenseByContactEmail(w, r, s.Email, source)
+		if !ok {
+			return nil, nil, false
+		}
+		return &downloadActor{Subject: s.Email, Token: nil}, lic, true
 	}
 	ct, err := h.d.Store.GetCustomerToken(ctx, s.UserID)
 	if err != nil {
@@ -162,6 +166,44 @@ func (h *downloadsHandler) resolveActor(w http.ResponseWriter, r *http.Request, 
 		return nil, nil, false
 	}
 	return &downloadActor{Subject: s.Email, Token: ct}, lic, true
+}
+
+// loadLicenseByContactEmail resolves an active license for an OIDC catalog
+// session by looking up license_contacts. Mirrors the entitlement model the
+// catalog browse endpoints use, so the download surface stays consistent:
+// any email on a non-revoked, non-expired license can pull the packages
+// granted to it.
+func (h *downloadsHandler) loadLicenseByContactEmail(w http.ResponseWriter, r *http.Request, email, source string) (*store.License, bool) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		writeJSONErr(w, http.StatusForbidden, "no entitled license for this session")
+		metrics.DownloadsTotal.WithLabelValues(source, "not_entitled").Inc()
+		return nil, false
+	}
+	licenses, err := h.d.Store.FindLicensesByContactEmail(r.Context(), email)
+	if err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, "license lookup failed")
+		metrics.DownloadsTotal.WithLabelValues(source, "not_entitled").Inc()
+		return nil, false
+	}
+	if len(licenses) == 0 {
+		writeJSONErr(w, http.StatusForbidden, "no entitled license for this session")
+		metrics.DownloadsTotal.WithLabelValues(source, "not_entitled").Inc()
+		return nil, false
+	}
+	// Pick the oldest active license (matches resolveLicenseForSession's v1 rule).
+	lic := &licenses[0]
+	if lic.RevokedAt != nil {
+		writeJSONErr(w, http.StatusForbidden, "license revoked")
+		metrics.DownloadsTotal.WithLabelValues(source, "not_entitled").Inc()
+		return nil, false
+	}
+	if lic.ExpiresAt != nil && time.Now().After(*lic.ExpiresAt) {
+		writeJSONErr(w, http.StatusForbidden, "license expired")
+		metrics.DownloadsTotal.WithLabelValues(source, "not_entitled").Inc()
+		return nil, false
+	}
+	return lic, true
 }
 
 // loadLicense fetches and validates the license bound to ct.
@@ -223,7 +265,7 @@ func (h *downloadsHandler) resolvePackage(w http.ResponseWriter, r *http.Request
 // memory for `listingCacheTTL` to keep GitHub rate limits comfortable.
 func (h *downloadsHandler) listReleases(w http.ResponseWriter, r *http.Request) {
 	const source = "github-release"
-	slug := chi.URLParam(r, "slug")
+	slug := slugParam(r)
 
 	actor, lic, ok := h.resolveActor(w, r, source)
 	if !ok {
@@ -291,7 +333,7 @@ func (h *downloadsHandler) listReleases(w http.ResponseWriter, r *http.Request) 
 // for the signed CDN URL, and 302s the customer there. We do NOT proxy bytes.
 func (h *downloadsHandler) downloadAsset(w http.ResponseWriter, r *http.Request) {
 	const source = "github-release"
-	slug := chi.URLParam(r, "slug")
+	slug := slugParam(r)
 	tag := chi.URLParam(r, "tag")
 	assetName := chi.URLParam(r, "asset")
 
