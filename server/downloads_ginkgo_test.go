@@ -165,7 +165,7 @@ var _ = Describe("Downloads", func() {
 			req.Header.Set("Authorization", "Basic "+cred)
 			resp, err := client.Do(req)
 			Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
 			var body struct {
@@ -188,7 +188,7 @@ var _ = Describe("Downloads", func() {
 		It("rejects requests without credentials", func() {
 			resp, err := client.Get(publicSrv.URL + "/download/cnak")
 			Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusUnauthorized))
 		})
 
@@ -199,7 +199,7 @@ var _ = Describe("Downloads", func() {
 			req.Header.Set("Authorization", "Basic "+cred)
 			resp, err := client.Do(req)
 			Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusForbidden))
 		})
 	})
@@ -212,7 +212,7 @@ var _ = Describe("Downloads", func() {
 			req.Header.Set("Authorization", "Basic "+cred)
 			resp, err := client.Do(req)
 			Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusFound))
 			Expect(resp.Header.Get("Location")).To(Equal(signedAsset))
 			Expect(resp.Header.Get("Content-Disposition")).
@@ -226,7 +226,7 @@ var _ = Describe("Downloads", func() {
 			req.Header.Set("Authorization", "Basic "+cred)
 			resp, err := client.Do(req)
 			Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusNotFound))
 		})
 	})
@@ -257,7 +257,7 @@ var _ = Describe("Downloads", func() {
 
 			resp, err := client.Do(req)
 			Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
 			var signResp struct {
@@ -273,7 +273,7 @@ var _ = Describe("Downloads", func() {
 			req2, _ := http.NewRequest(http.MethodGet, publicSrv.URL+signResp.URL, nil)
 			resp2, err := client.Do(req2)
 			Expect(err).NotTo(HaveOccurred())
-			defer resp2.Body.Close()
+			defer func() { _ = resp2.Body.Close() }()
 			Expect(resp2.StatusCode).To(Equal(http.StatusFound))
 			Expect(resp2.Header.Get("Location")).To(Equal(signedAsset))
 		})
@@ -281,7 +281,7 @@ var _ = Describe("Downloads", func() {
 		It("rejects an invalid signed token", func() {
 			resp, err := client.Get(publicSrv.URL + "/download/_signed/not-a-real-jwt")
 			Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusUnauthorized))
 		})
 	})

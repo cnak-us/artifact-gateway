@@ -202,7 +202,9 @@ dex:
   replicaCount: 1
   image:
     repository: dexidp/dex
-    tag: v2.41.1
+    # Keep in lock-step with docker-compose.yml so dev (compose) and
+    # production (helm) share the same Dex behavior. Bump both together.
+    tag: v2.45.1
   service:
     ports:
       http:

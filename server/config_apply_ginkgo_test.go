@@ -254,6 +254,12 @@ func (*configApplyFakeStore) RevokeCustomerToken(context.Context, uuid.UUID) err
 }
 func (*configApplyFakeStore) TouchCustomerToken(context.Context, uuid.UUID) error  { panic("unused") }
 func (*configApplyFakeStore) CountActiveCustomerTokens(context.Context) (int, error) { panic("unused") }
+func (*configApplyFakeStore) ListActiveCustomerTokenForLicense(context.Context, uuid.UUID) (*store.CustomerToken, error) {
+	panic("unused")
+}
+func (*configApplyFakeStore) RotateCustomerTokenForLicense(context.Context, uuid.UUID, *uuid.UUID, string, string, string) (uuid.UUID, error) {
+	panic("unused")
+}
 func (*configApplyFakeStore) GrantedPackagesForLicense(context.Context, uuid.UUID) ([]store.Package, error) {
 	panic("unused")
 }
@@ -435,7 +441,7 @@ spec:
       pat: tok
 `
 		resp := postApply(manifest)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		Expect(resp.StatusCode).To(Equal(http.StatusMultiStatus))
 
 		b, _ := io.ReadAll(resp.Body)
@@ -476,7 +482,7 @@ spec:
       pat: tok
 `
 		resp := postApply(manifest)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		Expect(resp.StatusCode).To(Equal(http.StatusOK))
 	})
 
@@ -506,7 +512,7 @@ spec:
           displayName: Worker
 `
 		resp := postApply(manifest)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
 		// One package row should be present and its upstream_repo cleared

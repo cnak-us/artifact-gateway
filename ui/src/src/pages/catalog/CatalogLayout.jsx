@@ -7,6 +7,7 @@ import TopBar from '../../components/TopBar.jsx';
 import ThemeToggle from '../../components/ThemeToggle.jsx';
 import { brand } from '../../brand/index.js';
 import { admin } from '../../api/client.js';
+import NoLicenseGate from './NoLicenseGate.jsx';
 
 // Customer-facing chrome: shares the same TopBar component as /admin/*
 // so the brand block, height, padding and border are pixel-identical
@@ -40,6 +41,11 @@ export default function CatalogLayout() {
   // shortcut in the top bar — clicking just navigates to /admin since the
   // ag_admin_session cookie is already in the browser.
   const canAdmin = session.can_admin;
+  // isLicensed gates the catalog content. When false, the layout still
+  // renders the chrome (TopBar with logout/theme/admin shortcut) but swaps
+  // the Outlet for NoLicenseGate so child routes (CatalogHome, CatalogPackage,
+  // CatalogCredentials) never mount and never fetch their data.
+  const isLicensed = session.is_licensed !== false;
 
   // Admin "view as customer" exit. Clears only ag_customer_session (admin
   // session stays alive), then sends the browser to /admin/licenses where the
@@ -63,19 +69,21 @@ export default function CatalogLayout() {
           <span className="hidden sm:inline">Admin</span>
         </a>
       )}
-      <NavLink
-        to="/catalog/credentials"
-        className={({ isActive }) =>
-          `inline-flex items-center gap-1.5 px-3 py-1.5 rounded font-medium transition-colors ${
-            isActive
-              ? 'text-g-accent-text bg-g-accent-main/10'
-              : 'text-g-text-secondary hover:text-g-text hover:bg-g-hover'
-          }`
-        }
-      >
-        <MdKey className="text-base" />
-        <span className="hidden sm:inline">My credential</span>
-      </NavLink>
+      {isLicensed && (
+        <NavLink
+          to="/catalog/credentials"
+          className={({ isActive }) =>
+            `inline-flex items-center gap-1.5 px-3 py-1.5 rounded font-medium transition-colors ${
+              isActive
+                ? 'text-g-accent-text bg-g-accent-main/10'
+                : 'text-g-text-secondary hover:text-g-text hover:bg-g-hover'
+            }`
+          }
+        >
+          <MdKey className="text-base" />
+          <span className="hidden sm:inline">My credential</span>
+        </NavLink>
+      )}
       <button
         type="button"
         onClick={doLogout}
@@ -112,7 +120,7 @@ export default function CatalogLayout() {
       )}
 
       <main className="flex-1">
-        <Outlet />
+        {isLicensed ? <Outlet /> : <NoLicenseGate session={session} />}
       </main>
 
       <footer className="text-center py-5 text-xs text-g-text-disabled border-t border-g-border-weak">

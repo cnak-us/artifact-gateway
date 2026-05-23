@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/mail"
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/cnak-us/artifact-gateway/store"
 
@@ -40,6 +42,7 @@ type brandingDTO struct {
 	AccentDarkMain     string    `json:"accent_dark_main"`
 	AccentDarkText     string    `json:"accent_dark_text"`
 	LogoSVG            string    `json:"logo_svg"`
+	SupportEmail       string    `json:"support_email"`
 	UpdatedAt          time.Time `json:"updated_at"`
 	UpdatedBy          string    `json:"updated_by"`
 }
@@ -59,9 +62,39 @@ func brandingToDTO(b *store.Branding) brandingDTO {
 		AccentDarkMain:     b.AccentDarkMain,
 		AccentDarkText:     b.AccentDarkText,
 		LogoSVG:            b.LogoSVG,
+		SupportEmail:       b.SupportEmail,
 		UpdatedAt:          b.UpdatedAt,
 		UpdatedBy:          b.UpdatedBy,
 	}
+}
+
+// maxSupportEmailLen is RFC 5321's local-part + "@" + domain length cap.
+// Anything longer is almost certainly a copy-paste accident and not a real
+// address; rejecting at the boundary keeps malformed input out of the table.
+const maxSupportEmailLen = 254
+
+// validateSupportEmail accepts an empty string (no override — UI falls back
+// to the compiled-in preset) or a syntactically valid RFC 5322 address with
+// no control characters. It deliberately rejects forms like
+// `"Display Name" <a@b>` because the UI only renders bare mailto: targets.
+func validateSupportEmail(v string) bool {
+	if v == "" {
+		return true
+	}
+	if len(v) > maxSupportEmailLen {
+		return false
+	}
+	for _, r := range v {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	addr, err := mail.ParseAddress(v)
+	if err != nil {
+		return false
+	}
+	// Reject "Display <local@domain>" — addr.Address is the bare email.
+	return addr.Address == v
 }
 
 // accentRE matches an "R G B" triplet (1-3 digits each, single spaces). The
@@ -77,7 +110,7 @@ const maxLogoBytes = 64 * 1024
 func writeBrandingErr(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	fmt.Fprintf(w, `{"error":{"code":%q,"message":%q}}`, code, msg)
+	_, _ = fmt.Fprintf(w, `{"error":{"code":%q,"message":%q}}`, code, msg)
 }
 
 // validateAccent returns true when the triplet is acceptable (empty is OK —
@@ -121,6 +154,7 @@ func decodeBranding(w http.ResponseWriter, r *http.Request) (*store.Branding, bo
 		AccentDarkMain:     strings.TrimSpace(in.AccentDarkMain),
 		AccentDarkText:     strings.TrimSpace(in.AccentDarkText),
 		LogoSVG:            strings.TrimSpace(in.LogoSVG),
+		SupportEmail:       strings.TrimSpace(in.SupportEmail),
 	}
 	for _, a := range []string{b.AccentLightMain, b.AccentLightText, b.AccentDarkMain, b.AccentDarkText} {
 		if !validateAccent(a) {
@@ -128,6 +162,11 @@ func decodeBranding(w http.ResponseWriter, r *http.Request) (*store.Branding, bo
 				`accent color must be three 0-255 integers separated by single spaces, e.g. "56 113 220"`)
 			return nil, false
 		}
+	}
+	if !validateSupportEmail(b.SupportEmail) {
+		writeBrandingErr(w, http.StatusBadRequest, "branding_invalid_support_email",
+			"support_email must be a valid email address (or empty)")
+		return nil, false
 	}
 	if b.LogoSVG != "" {
 		if len(b.LogoSVG) > maxLogoBytes {
@@ -184,6 +223,11 @@ func handlePutBranding(d AdminDeps) http.HandlerFunc {
 			if kv.v != "" {
 				fieldsSet = append(fieldsSet, kv.name)
 			}
+		}
+		// Surface presence of support_email separately so the audit log keeps
+		// a binary "was it set" signal without recording the address itself.
+		if b.SupportEmail != "" {
+			fieldsSet = append(fieldsSet, "support_email")
 		}
 		summary, _ := json.Marshal(map[string]any{
 			"logo_changed": b.LogoSVG != "",

@@ -147,7 +147,7 @@ func TestBearerExchangeFullCycle(t *testing.T) {
 
 	// OnUnauthorized: do the realm exchange.
 	retry, err := auth.OnUnauthorized(context.Background(), resp1, cred, []byte("pw"))
-	resp1.Body.Close()
+	_ = resp1.Body.Close()
 	if err != nil {
 		t.Fatalf("OnUnauthorized: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestBearerExchangeFullCycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Do 2: %v", err)
 	}
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 	if resp2.StatusCode != http.StatusOK {
 		t.Fatalf("retry status = %d, want 200", resp2.StatusCode)
 	}

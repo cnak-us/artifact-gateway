@@ -132,6 +132,12 @@ func (*grantsFakeStore) TouchCustomerToken(context.Context, uuid.UUID) error {
 	panic("unused")
 }
 func (*grantsFakeStore) CountActiveCustomerTokens(context.Context) (int, error) { panic("unused") }
+func (*grantsFakeStore) ListActiveCustomerTokenForLicense(context.Context, uuid.UUID) (*store.CustomerToken, error) {
+	panic("unused")
+}
+func (*grantsFakeStore) RotateCustomerTokenForLicense(context.Context, uuid.UUID, *uuid.UUID, string, string, string) (uuid.UUID, error) {
+	panic("unused")
+}
 func (*grantsFakeStore) GrantedPackagesForLicense(context.Context, uuid.UUID) ([]store.Package, error) {
 	panic("unused")
 }
@@ -267,7 +273,7 @@ var _ = Describe("Admin grants handlers", func() {
 			body := `{"grants":[{"package_id":"` + pkgID.String() + `","actions":["pull"]}]}`
 
 			resp := putGrants(body)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusNoContent))
 
 			Expect(st.replaceCalls).To(Equal(1))
@@ -280,7 +286,7 @@ var _ = Describe("Admin grants handlers", func() {
 				{LicenseID: licID, PackageID: pkgID, Actions: []string{"pull"}},
 			}
 			gresp := getGrants()
-			defer gresp.Body.Close()
+			defer func() { _ = gresp.Body.Close() }()
 			Expect(gresp.StatusCode).To(Equal(http.StatusOK))
 			b, _ := io.ReadAll(gresp.Body)
 			var wrapped struct {
@@ -300,7 +306,7 @@ var _ = Describe("Admin grants handlers", func() {
 			body := `{"package_ids":["` + pkgID.String() + `"],"actions":["pull"]}`
 
 			resp := putGrants(body)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusNoContent))
 
 			Expect(st.replaceCalls).To(Equal(1))
@@ -310,7 +316,7 @@ var _ = Describe("Admin grants handlers", func() {
 
 		It("rejects an empty {} body and does not call the store", func() {
 			resp := putGrants(`{}`)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
 
 			b, _ := io.ReadAll(resp.Body)
@@ -324,7 +330,7 @@ var _ = Describe("Admin grants handlers", func() {
 
 		It("treats an explicit empty grants array as a clear", func() {
 			resp := putGrants(`{"grants":[]}`)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusNoContent))
 
 			Expect(st.replaceCalls).To(Equal(1))
@@ -339,7 +345,7 @@ var _ = Describe("Admin grants handlers", func() {
 				`]}`
 
 			resp := putGrants(body)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusNoContent))
 
 			Expect(st.replaceCalls).To(Equal(1))
@@ -355,7 +361,7 @@ var _ = Describe("Admin grants handlers", func() {
 				`]}`
 
 			resp := putGrants(body)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusNoContent))
 
 			Expect(st.replaceCalls).To(Equal(1))

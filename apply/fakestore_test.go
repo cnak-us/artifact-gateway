@@ -291,6 +291,12 @@ func (*fakeStore) InsertCustomerToken(context.Context, *store.CustomerToken) err
 func (*fakeStore) RevokeCustomerToken(context.Context, uuid.UUID) error            { panic("unused") }
 func (*fakeStore) TouchCustomerToken(context.Context, uuid.UUID) error             { panic("unused") }
 func (*fakeStore) CountActiveCustomerTokens(context.Context) (int, error)          { panic("unused") }
+func (*fakeStore) ListActiveCustomerTokenForLicense(context.Context, uuid.UUID) (*store.CustomerToken, error) {
+	panic("unused")
+}
+func (*fakeStore) RotateCustomerTokenForLicense(context.Context, uuid.UUID, *uuid.UUID, string, string, string) (uuid.UUID, error) {
+	panic("unused")
+}
 
 func (*fakeStore) ListContactsForLicense(context.Context, uuid.UUID) ([]store.LicenseContact, error) {
 	panic("unused")

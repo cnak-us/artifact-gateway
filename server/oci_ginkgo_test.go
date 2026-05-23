@@ -186,7 +186,7 @@ var _ = Describe("OCI server", func() {
 		It("returns 401 with a Bearer challenge when unauthenticated", func() {
 			resp, err := client.Get(publicSrv.URL + "/v2/")
 			Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusUnauthorized))
 			Expect(resp.Header.Get("Www-Authenticate")).To(ContainSubstring(`realm="https://test-host:9999/v2/token"`))
 			Expect(resp.Header.Get("Docker-Distribution-API-Version")).To(Equal("registry/2.0"))
@@ -198,7 +198,7 @@ var _ = Describe("OCI server", func() {
 			req.Header.Set("Authorization", "Bearer "+tok)
 			resp, err := client.Do(req)
 			Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
 		})
 	})
@@ -247,7 +247,7 @@ var _ = Describe("OCI server", func() {
 			req.Header.Set("Authorization", "Bearer "+tok)
 			resp, err := client.Do(req)
 			Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
 			Expect(resp.Header.Get("Content-Type")).To(Equal("application/vnd.oci.image.manifest.v1+json"))
 			Expect(resp.Header.Get("Docker-Content-Digest")).To(Equal("sha256:deadbeef"))
@@ -259,7 +259,7 @@ var _ = Describe("OCI server", func() {
 			req.Header.Set("Authorization", "Bearer "+tok)
 			resp, err := client.Do(req)
 			Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusTemporaryRedirect))
 			Expect(resp.Header.Get("Location")).To(Equal("https://signed.example.invalid/payload"))
 		})
@@ -270,7 +270,7 @@ var _ = Describe("OCI server", func() {
 			req.Header.Set("Authorization", "Bearer "+tok)
 			resp, err := client.Do(req)
 			Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusUnauthorized))
 		})
 
@@ -280,14 +280,14 @@ var _ = Describe("OCI server", func() {
 			_, _ = rand.Read(shortKey)
 			expSigner, err := auth.NewJWTSigner(toHex(shortKey), "artifact-gateway", "test-host:9999", time.Nanosecond)
 			Expect(err).NotTo(HaveOccurred())
-			tok, _, _, err := expSigner.Mint(tokenID, nil)
+			tok, _, _, err := expSigner.Mint(tokenID, uuid.New(), nil)
 			Expect(err).NotTo(HaveOccurred())
 			time.Sleep(2 * time.Millisecond)
 			req, _ := http.NewRequest(http.MethodGet, publicSrv.URL+"/v2/acme/widget/manifests/v1", nil)
 			req.Header.Set("Authorization", "Bearer "+tok)
 			resp, err := client.Do(req)
 			Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			// Wrong key + wrong issuer combined with expiry → 401.
 			Expect(resp.StatusCode).To(Equal(http.StatusUnauthorized))
 		})
@@ -297,7 +297,7 @@ var _ = Describe("OCI server", func() {
 // --- helpers ----------------------------------------------------------------
 
 func mintJWT(s *auth.JWTSigner, sub string, access []auth.Access) string {
-	tok, _, _, err := s.Mint(sub, access)
+	tok, _, _, err := s.Mint(sub, uuid.New(), access)
 	Expect(err).NotTo(HaveOccurred())
 	return tok
 }
@@ -323,7 +323,7 @@ func rawTokenMint(c *http.Client, base, service, tid, sec, scope string) *http.R
 
 func doTokenMint(c *http.Client, base, service, tid, sec, scope string) tokenBody {
 	resp := rawTokenMint(c, base, service, tid, sec, scope)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	Expect(resp.StatusCode).To(Equal(http.StatusOK))
 	b, _ := io.ReadAll(resp.Body)
 	var out tokenBody
@@ -490,7 +490,7 @@ var _ = Describe("OCI server (multi-container)", func() {
 		req.Header.Set("Authorization", "Bearer "+tok)
 		resp, err := client.Do(req)
 		Expect(err).NotTo(HaveOccurred())
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		Expect(resp.StatusCode).To(Equal(http.StatusOK))
 		Expect(resp.Header.Get("Docker-Content-Digest")).To(Equal("sha256:backend"))
 		body, _ := io.ReadAll(resp.Body)
@@ -505,7 +505,7 @@ var _ = Describe("OCI server (multi-container)", func() {
 		req.Header.Set("Authorization", "Bearer "+tok)
 		resp, err := client.Do(req)
 		Expect(err).NotTo(HaveOccurred())
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		Expect(resp.StatusCode).To(Equal(http.StatusOK))
 		Expect(resp.Header.Get("Docker-Content-Digest")).To(Equal("sha256:worker"))
 	})
@@ -520,7 +520,7 @@ var _ = Describe("OCI server (multi-container)", func() {
 		req.Header.Set("Authorization", "Bearer "+tok)
 		resp, err := client.Do(req)
 		Expect(err).NotTo(HaveOccurred())
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		Expect(resp.StatusCode).To(Equal(http.StatusNotFound))
 		body, _ := io.ReadAll(resp.Body)
 		Expect(string(body)).To(ContainSubstring("NAME_UNKNOWN"))
@@ -534,7 +534,7 @@ var _ = Describe("OCI server (multi-container)", func() {
 		req.Header.Set("Authorization", "Bearer "+tok)
 		resp, err := client.Do(req)
 		Expect(err).NotTo(HaveOccurred())
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		Expect(resp.StatusCode).To(Equal(http.StatusNotFound))
 		body, _ := io.ReadAll(resp.Body)
 		Expect(string(body)).To(ContainSubstring("NAME_UNKNOWN"))

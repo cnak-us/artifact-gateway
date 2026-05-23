@@ -200,7 +200,7 @@ export default function CatalogLogin() {
           </div>
 
           <div className="mt-6 text-center text-xs text-g-text-secondary">
-            Lost your credential? <a href="mailto:support@cnak.us" className="text-g-text-link">Contact support</a>.
+            Lost your credential? <a href={`mailto:${brand.supportEmail}`} className="text-g-text-link">Contact support</a>.
           </div>
           <div className="mt-2 text-center text-xs text-g-text-disabled">
             Administrator? <Link to="/admin/login" className="text-g-text-link">Admin login</Link>.

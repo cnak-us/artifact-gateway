@@ -26,6 +26,9 @@ type Deps struct {
 	Cfg      *config.Config
 	Upstream *Upstream
 	Logger   *slog.Logger
+	// Revoker drives the row-level revocation check used by BearerJWT. May be
+	// nil in narrow test scenarios — production wiring sets it.
+	Revoker *TokenRevocationChecker
 }
 
 // MountOCI wires /v2/* onto r.
@@ -56,7 +59,7 @@ func MountOCI(r chi.Router, d Deps) {
 		r.Post("/token", tokenHandler.ServeHTTP)
 
 		// Everything else is the proxy path.
-		r.With(BearerJWT(d.Signer, d.Cfg)).HandleFunc("/*", handleProxy(d))
+		r.With(BearerJWT(d.Signer, d.Cfg, d.Revoker)).HandleFunc("/*", handleProxy(d))
 	})
 }
 
@@ -72,19 +75,19 @@ func handleV2Root(d Deps) http.HandlerFunc {
 			w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprint(w, `{"errors":[{"code":"UNAUTHORIZED","message":"authentication required"}]}`)
+			_, _ = fmt.Fprint(w, `{"errors":[{"code":"UNAUTHORIZED","message":"authentication required"}]}`)
 			return
 		}
 		if _, err := d.Signer.Verify(strings.TrimSpace(authz[len("Bearer "):])); err != nil {
 			w.Header().Set("Www-Authenticate", challenge)
 			w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprint(w, `{"errors":[{"code":"UNAUTHORIZED","message":"invalid or expired token"}]}`)
+			_, _ = fmt.Fprint(w, `{"errors":[{"code":"UNAUTHORIZED","message":"invalid or expired token"}]}`)
 			return
 		}
 		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{}`)
+		_, _ = fmt.Fprint(w, `{}`)
 	}
 }
 
@@ -200,5 +203,5 @@ func writeOCIError(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 	w.WriteHeader(status)
-	fmt.Fprintf(w, `{"errors":[{"code":%q,"message":%q}]}`, code, msg)
+	_, _ = fmt.Fprintf(w, `{"errors":[{"code":%q,"message":%q}]}`, code, msg)
 }

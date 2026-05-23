@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { MdClose } from 'react-icons/md';
 import clsx from 'clsx';
@@ -11,6 +11,21 @@ const sizeMap = {
   xl: 'max-w-5xl',
 };
 
+// focusableSelector lists every element that can receive Tab focus. Kept in
+// sync with the WCAG-recommended "what's focusable" list; excludes elements
+// with [tabindex=-1] (programmatic-focus only) and disabled controls.
+const focusableSelector = [
+  'a[href]',
+  'area[href]',
+  'input:not([disabled]):not([type=hidden])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  'button:not([disabled])',
+  'iframe',
+  '[tabindex]:not([tabindex="-1"])',
+  '[contenteditable=true]',
+].join(',');
+
 export default function Modal({
   open,
   onClose,
@@ -21,11 +36,63 @@ export default function Modal({
   size = 'md',
   className = '',
 }) {
+  const dialogRef = useRef(null);
+  const restoreRef = useRef(null);
+
   useEffect(() => {
     if (!open) return;
-    const onKey = (e) => { if (e.key === 'Escape') onClose?.(); };
+    // Save focus so we can restore it when the modal closes — meets WCAG's
+    // "return focus to the invoking element" requirement.
+    restoreRef.current = typeof document !== 'undefined' ? document.activeElement : null;
+
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        onClose?.();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const node = dialogRef.current;
+      if (!node) return;
+      const items = node.querySelectorAll(focusableSelector);
+      if (!items.length) {
+        e.preventDefault();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (e.shiftKey) {
+        if (document.activeElement === first || !node.contains(document.activeElement)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
     document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+
+    // Initial focus — first focusable element inside the dialog so screen
+    // readers and keyboard users land in the modal, not in the page behind.
+    const t = window.setTimeout(() => {
+      const node = dialogRef.current;
+      if (!node) return;
+      const first = node.querySelector(focusableSelector);
+      (first || node).focus?.();
+    }, 0);
+
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      window.clearTimeout(t);
+      // Restore focus to the element that opened the modal.
+      const prev = restoreRef.current;
+      restoreRef.current = null;
+      if (prev && typeof prev.focus === 'function') {
+        try { prev.focus(); } catch { /* removed from DOM */ }
+      }
+    };
   }, [open, onClose]);
 
   if (!open) return null;
@@ -33,8 +100,10 @@ export default function Modal({
   return createPortal(
     <div className="fixed inset-0 z-[2000] flex items-center justify-center p-4 bg-black/60 animate-fadeIn">
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className={clsx(
-          'w-full max-h-[90vh] flex flex-col bg-g-elevated border border-g-border-weak rounded shadow-z3',
+          'w-full max-h-[90vh] flex flex-col bg-g-elevated border border-g-border-weak rounded shadow-z3 outline-none',
           sizeMap[size] || sizeMap.md,
           className,
         )}

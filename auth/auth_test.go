@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -144,7 +145,7 @@ var _ = Describe("JWTSigner", func() {
 		s, err := auth.NewJWTSigner(randomHexKey(32), issuer, audience, 5*time.Minute)
 		Expect(err).NotTo(HaveOccurred())
 
-		tok, expiresIn, iat, err := s.Mint("TOKID1234567890ABCDE", access)
+		tok, expiresIn, iat, err := s.Mint("TOKID1234567890ABCDE", uuid.New(), access)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(tok).NotTo(BeEmpty())
 		Expect(expiresIn).To(Equal(300))
@@ -189,13 +190,58 @@ var _ = Describe("JWTSigner", func() {
 		Expect(errors.Is(err, jwt.ErrTokenExpired)).To(BeTrue())
 	})
 
+	It("rejects v=1 (pre-immediate-cutoff) tokens", func() {
+		// Build a token whose only sin is missing the new `v` and `trid`
+		// claims — this is what a pre-upgrade token looks like. Verify must
+		// reject so a leaked older token can't keep pulling after the
+		// upgrade rolls out.
+		secretHex := randomHexKey(32)
+		s, err := auth.NewJWTSigner(secretHex, issuer, audience, time.Minute)
+		Expect(err).NotTo(HaveOccurred())
+		keyBytes, err := hex.DecodeString(secretHex)
+		Expect(err).NotTo(HaveOccurred())
+		now := time.Now()
+		legacy := jwt.MapClaims{
+			"iss": issuer,
+			"sub": "SUB",
+			"aud": audience,
+			"iat": now.Unix(),
+			"nbf": now.Unix(),
+			"exp": now.Add(time.Minute).Unix(),
+			"jti": "legacy",
+		}
+		tok, err := jwt.NewWithClaims(jwt.SigningMethodHS256, legacy).SignedString(keyBytes)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = s.Verify(tok)
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("rejects mint without a token row id", func() {
+		s, err := auth.NewJWTSigner(randomHexKey(32), issuer, audience, time.Minute)
+		Expect(err).NotTo(HaveOccurred())
+		_, _, _, err = s.Mint("SUB", uuid.Nil, access)
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("embeds the token row id in verified claims", func() {
+		s, err := auth.NewJWTSigner(randomHexKey(32), issuer, audience, time.Minute)
+		Expect(err).NotTo(HaveOccurred())
+		rowID := uuid.New()
+		tok, _, _, err := s.Mint("SUB", rowID, access)
+		Expect(err).NotTo(HaveOccurred())
+		claims, err := s.Verify(tok)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(claims.TokenRowID).To(Equal(rowID))
+		Expect(claims.Ver).To(Equal(2))
+	})
+
 	It("rejects a token signed with the wrong key", func() {
 		s1, err := auth.NewJWTSigner(randomHexKey(32), issuer, audience, time.Minute)
 		Expect(err).NotTo(HaveOccurred())
 		s2, err := auth.NewJWTSigner(randomHexKey(32), issuer, audience, time.Minute)
 		Expect(err).NotTo(HaveOccurred())
 
-		tok, _, _, err := s1.Mint("SUB", access)
+		tok, _, _, err := s1.Mint("SUB", uuid.New(), access)
 		Expect(err).NotTo(HaveOccurred())
 
 		_, err = s2.Verify(tok)

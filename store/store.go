@@ -155,8 +155,12 @@ type Branding struct {
 	AccentDarkMain     string
 	AccentDarkText     string
 	LogoSVG            string
-	UpdatedAt          time.Time
-	UpdatedBy          string
+	// SupportEmail is the customer-facing "contact" address shown to
+	// unlicensed users on the no-access gate and on the credential page. The
+	// UI falls back to the compiled-in preset email when empty.
+	SupportEmail string
+	UpdatedAt    time.Time
+	UpdatedBy    string
 }
 
 type CustomerToken struct {
@@ -289,6 +293,20 @@ type DataStore interface {
 	RevokeCustomerToken(ctx context.Context, id uuid.UUID) error
 	TouchCustomerToken(ctx context.Context, id uuid.UUID) error
 	CountActiveCustomerTokens(ctx context.Context) (int, error)
+	// ListActiveCustomerTokenForLicense returns the at-most-one active token
+	// for a license. Returns ErrNotFound when the license has no active token.
+	// "Active" means revoked_at IS NULL.
+	ListActiveCustomerTokenForLicense(ctx context.Context, licenseID uuid.UUID) (*CustomerToken, error)
+	// RotateCustomerTokenForLicense atomically revokes any existing active
+	// token for licenseID and inserts a new row with the supplied tokenID +
+	// secretHash. Returns the new row's UUID. Pass tokenID/secretHash produced
+	// by auth.GenerateCustomerToken + auth.HashSecret — keeping crypto in the
+	// caller avoids importing auth from store. Returns ErrNotFound when the
+	// license is missing or revoked; ErrRotateConcurrent when two rotates race
+	// and the partial unique index rejects the loser.
+	RotateCustomerTokenForLicense(ctx context.Context, licenseID uuid.UUID,
+		createdBy *uuid.UUID, description, tokenID, secretHash string,
+	) (newRowID uuid.UUID, err error)
 
 	// license contacts (federated-login allowlist)
 	// ListContactsForLicense returns contacts ordered by created_at ASC; AddContact upserts

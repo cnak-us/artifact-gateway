@@ -172,7 +172,7 @@ func probeGitHubUser(r *http.Request, pat string) probeResult {
 			Summary:    "network error: " + err.Error(),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, isJSON := readProbeBody(resp)
 	headers := pickHeaders(resp.Header)
@@ -239,7 +239,7 @@ func probeOCIBasic(r *http.Request, cred *store.UpstreamCredential, pat string) 
 			Summary:    "network error: " + err.Error(),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, isJSON := readProbeBody(resp)
 	headers := pickHeaders(resp.Header)
@@ -330,7 +330,7 @@ func probeBearerExchange(r *http.Request, cred *store.UpstreamCredential, pat st
 			}
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, isJSON := readProbeBody(resp)
 	res := probeResult{
@@ -373,7 +373,7 @@ func probeGitLabUser(r *http.Request, cred *store.UpstreamCredential, pat string
 			Summary:    "network error: " + err.Error(),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, isJSON := readProbeBody(resp)
 	res := probeResult{
@@ -425,7 +425,7 @@ func probeGitLabReleases(r *http.Request, pkg *store.Package, cred *store.Upstre
 			Summary:    "network error: " + err.Error(),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, isJSON := readProbeBody(resp)
 	res := probeResult{
 		OK:         resp.StatusCode >= 200 && resp.StatusCode < 300,
@@ -491,7 +491,7 @@ func probeIssuerMint(r *http.Request, d AdminDeps, cred *store.UpstreamCredentia
 			Summary:    "network error: " + err.Error(),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, isJSON := readProbeBody(resp)
 	is2xx := resp.StatusCode >= 200 && resp.StatusCode < 300
 	res := probeResult{
@@ -554,7 +554,7 @@ func probeGHCRRegistry(r *http.Request, username, pat string) probeResult {
 			Summary:    "network error: " + err.Error(),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, isJSON := readProbeBody(resp)
 	headers := pickHeaders(resp.Header)
@@ -682,7 +682,7 @@ func probeGitHubReleases(r *http.Request, pkg *store.Package, pat string) probeR
 			Summary:    "network error: " + err.Error(),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, isJSON := readProbeBody(resp)
 	headers := pickHeaders(resp.Header)
@@ -771,7 +771,7 @@ func probeOCITagListRepo(r *http.Request, upstreamRepo string, cred *store.Upstr
 			}
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, isJSON := readProbeBody(resp)
 	headers := pickHeaders(resp.Header)

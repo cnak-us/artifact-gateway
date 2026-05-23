@@ -14,6 +14,7 @@
  * @property {string} catalogHeroEyebrow e.g. "Your CNAK distribution"
  * @property {string} htmlTitle          <title> value
  * @property {string} metaDescription    <meta name="description">
+ * @property {string} supportEmail       Customer-facing contact address, used by NoLicenseGate and the credential page
  * @property {string} themeStorageKey    localStorage key for theme persistence
  * @property {{ light: BrandAccent, dark: BrandAccent }} accent
  * @property {React.ComponentType<{ className?: string }>} Logo  Accepts className, uses currentColor

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { MdAdd, MdDelete, MdWarning, MdGroup } from 'react-icons/md';
+import { MdAdd, MdRefresh, MdDelete, MdWarning, MdGroup, MdExpandMore, MdExpandLess } from 'react-icons/md';
 import { admin } from '../../api/client.js';
 import { useToast } from '../../components/Toast.jsx';
 import { useConfirm } from '../../components/ConfirmDialog.jsx';
@@ -11,19 +11,22 @@ import ErrorBanner from '../../components/ErrorBanner.jsx';
 import Table from '../../components/Table.jsx';
 import Badge from '../../components/Badge.jsx';
 import EmptyState from '../../components/EmptyState.jsx';
-import Input from '../../components/Input.jsx';
-import Select from '../../components/Select.jsx';
 import Card from '../../components/Card.jsx';
 import CopyableCode from '../../components/CopyableCode.jsx';
 
+// Customers shows one row per license with its single active customer
+// credential (if any) plus a collapsible history of revoked tokens. The
+// invariant "one active credential per license" is enforced by the backend
+// partial unique index; this page only ever shows the active token in the
+// primary row and rotation replaces it atomically.
 export default function Customers() {
   const toast = useToast();
   const confirm = useConfirm();
   const [tokens, setTokens] = useState(null);
   const [licenses, setLicenses] = useState([]);
   const [err, setErr] = useState(null);
-  const [createOpen, setCreateOpen] = useState(false);
   const [newCred, setNewCred] = useState(null);
+  const [busyLic, setBusyLic] = useState(null); // license id currently rotating
 
   const load = async () => {
     setErr(null);
@@ -38,23 +41,56 @@ export default function Customers() {
   };
   useEffect(() => { load(); }, []);
 
-  const grouped = useMemo(() => {
+  // One row per license: a primary "active token" slot (or "no credential")
+  // and a list of revoked tokens for forensics. Licenses without any tokens
+  // still appear so admins can issue a first credential.
+  const rows = useMemo(() => {
     if (!tokens) return [];
-    const byLic = new Map();
+    const tokensByLic = new Map();
     for (const t of tokens) {
-      if (!byLic.has(t.license_id)) byLic.set(t.license_id, []);
-      byLic.get(t.license_id).push(t);
+      if (!tokensByLic.has(t.license_id)) tokensByLic.set(t.license_id, []);
+      tokensByLic.get(t.license_id).push(t);
     }
-    return [...byLic.entries()].map(([licId, ts]) => ({
-      license: licenses.find((l) => l.id === licId) || { id: licId, license_id: licId },
-      tokens: ts,
-    }));
+    return licenses
+      .filter((l) => !l.revoked_at)
+      .map((license) => {
+        const lt = tokensByLic.get(license.id) || [];
+        const active = lt.find((t) => !t.revoked_at) || null;
+        const history = lt.filter((t) => t.revoked_at)
+          .sort((a, b) => new Date(b.revoked_at) - new Date(a.revoked_at));
+        return { license, active, history };
+      });
   }, [tokens, licenses]);
 
+  const rotate = async (license) => {
+    const ok = await confirm({
+      title: license.active ? `Rotate credential for ${license.customer || license.license_id}?` : `Generate credential for ${license.customer || license.license_id}?`,
+      message: license.active
+        ? 'This revokes the current credential immediately. Pulls using the old secret will start failing within seconds.'
+        : 'Issue a new credential. You will see the secret once.',
+      confirmLabel: license.active ? 'Rotate' : 'Generate',
+      danger: !!license.active,
+    });
+    if (!ok) return;
+    setBusyLic(license.id);
+    try {
+      const result = await admin.rotateCustomerToken(license.id);
+      setNewCred(result);
+      await load();
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setBusyLic(null);
+    }
+  };
+
+  // Manual revoke kept as an escape hatch even though "rotate" now replaces
+  // it as the everyday action. Useful when an admin wants the license to
+  // have NO credential (e.g. customer offboarding).
   const revoke = async (t) => {
     const ok = await confirm({
-      title: 'Revoke token?',
-      message: `Token ${t.token_id} will be revoked. The customer will be locked out immediately.`,
+      title: 'Revoke without replacement?',
+      message: `Token ${t.token_id} will be revoked and the license will have no active credential until you generate a new one.`,
       confirmLabel: 'Revoke token',
       danger: true,
     });
@@ -63,121 +99,125 @@ export default function Customers() {
     catch (e) { toast.error(e.message); }
   };
 
-  const tokenColumns = [
-    { key: 'token_id', header: 'Token ID', render: (t) => <span className="font-mono text-xs">{t.token_id}</span> },
-    { key: 'description', header: 'Description', render: (t) => t.description || '—' },
-    { key: 'expires', header: 'Expires', render: (t) => <span className="text-xs">{t.expires_at ? new Date(t.expires_at).toLocaleString() : 'never'}</span> },
-    { key: 'last_used', header: 'Last used', render: (t) => <span className="text-xs text-g-text-secondary">{t.last_used_at ? new Date(t.last_used_at).toLocaleString() : 'never'}</span> },
-    {
-      key: 'status',
-      header: 'Status',
-      render: (t) => t.revoked_at ? <Badge color="red">revoked</Badge> : <Badge color="green">active</Badge>,
-    },
-    {
-      key: 'actions',
-      header: '',
-      className: 'text-right',
-      render: (t) => !t.revoked_at ? (
-        <IconButton icon={<MdDelete />} label="Revoke" variant="danger" onClick={() => revoke(t)} />
-      ) : null,
-    },
-  ];
-
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold">Customers</h1>
-          <p className="text-sm text-g-text-secondary">Per-customer credentials bound to a license.</p>
+          <p className="text-sm text-g-text-secondary">
+            One docker-pull credential per license. Rotate to issue a new secret;
+            the previous credential is revoked atomically.
+          </p>
         </div>
-        <Button variant="primary" icon={<MdAdd />} onClick={() => setCreateOpen(true)}>Generate token</Button>
       </div>
 
       <ErrorBanner error={err} />
 
-      {tokens === null ? <Spinner label="Loading tokens" /> : grouped.length === 0 ? (
+      {tokens === null ? (
+        <Spinner label="Loading credentials" />
+      ) : rows.length === 0 ? (
         <EmptyState
           icon={MdGroup}
-          title="No customer tokens yet"
-          description="Generate a credential bound to a license. The customer uses it to `docker pull` and to log into the catalog."
-          action={<Button variant="primary" icon={<MdAdd />} onClick={() => setCreateOpen(true)}>Generate token</Button>}
+          title="No licenses yet"
+          description="Issue a license first; each license gets its own credential."
         />
       ) : (
         <div className="space-y-4">
-          {grouped.map(({ license, tokens }) => (
-            <Card key={license.id} padding="none">
-              <div className="px-4 py-2.5 border-b border-g-border-weak bg-g-secondary/50">
-                <div className="font-medium text-sm">{license.customer || license.license_id}</div>
-                <div className="text-xs text-g-text-secondary flex items-center gap-2 mt-0.5">
-                  <span className="font-mono">{license.license_id}</span>
-                  {license.tier && <Badge color="blue">{license.tier}</Badge>}
-                </div>
-              </div>
-              <Table columns={tokenColumns} rows={tokens} className="border-0 rounded-none" />
-            </Card>
+          {rows.map(({ license, active, history }) => (
+            <LicenseCredentialRow
+              key={license.id}
+              license={{ ...license, active }}
+              active={active}
+              history={history}
+              busy={busyLic === license.id}
+              onRotate={() => rotate({ ...license, active })}
+              onRevoke={() => active && revoke(active)}
+            />
           ))}
         </div>
       )}
 
-      <GenerateModal
-        open={createOpen}
-        onClose={() => setCreateOpen(false)}
-        licenses={licenses}
-        onCreated={(result) => { setCreateOpen(false); setNewCred(result); load(); }}
-      />
       <NewCredentialModal cred={newCred} onClose={() => setNewCred(null)} />
     </div>
   );
 }
 
-function GenerateModal({ open, onClose, licenses, onCreated }) {
-  const [form, setForm] = useState({ license_id: '', description: '', expires_at: '' });
-  const [err, setErr] = useState(null);
-  const [busy, setBusy] = useState(false);
+function LicenseCredentialRow({ license, active, history, busy, onRotate, onRevoke }) {
+  const [showHistory, setShowHistory] = useState(false);
 
-  useEffect(() => {
-    if (!open) { setForm({ license_id: '', description: '', expires_at: '' }); setErr(null); }
-  }, [open]);
-
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
-
-  const save = async () => {
-    setErr(null); setBusy(true);
-    try {
-      const result = await admin.createCustomerToken({
-        license_id: form.license_id,
-        description: form.description || undefined,
-        expires_at: form.expires_at ? new Date(form.expires_at).toISOString() : undefined,
-      });
-      onCreated(result);
-    } catch (e) { setErr(e); }
-    finally { setBusy(false); }
-  };
-
-  const licOpts = licenses.filter((l) => !l.revoked_at).map((l) => ({
-    value: l.id,
-    label: `${l.customer || l.license_id} — ${l.license_id}`,
-  }));
+  const historyColumns = [
+    { key: 'token_id', header: 'Token ID', render: (t) => <span className="font-mono text-xs">{t.token_id}</span> },
+    { key: 'description', header: 'Description', render: (t) => t.description || '—' },
+    { key: 'created', header: 'Created', render: (t) => <span className="text-xs">{t.created_at ? new Date(t.created_at).toLocaleString() : '—'}</span> },
+    { key: 'revoked', header: 'Revoked', render: (t) => <span className="text-xs text-g-text-secondary">{t.revoked_at ? new Date(t.revoked_at).toLocaleString() : '—'}</span> },
+    { key: 'last_used', header: 'Last used', render: (t) => <span className="text-xs text-g-text-secondary">{t.last_used_at ? new Date(t.last_used_at).toLocaleString() : 'never'}</span> },
+  ];
 
   return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title="Generate customer token"
-      footer={
-        <>
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" loading={busy} disabled={!form.license_id} onClick={save}>{busy ? 'Generating…' : 'Generate'}</Button>
-        </>
-      }
-    >
-      <div className="space-y-3">
-        <Select label="License *" value={form.license_id} onChange={set('license_id')} placeholder="— select license —" options={licOpts} />
-        <Input label="Description" value={form.description} onChange={set('description')} placeholder="e.g. CI runner — east-cluster" />
-        <Input label="Expires at (optional)" type="datetime-local" value={form.expires_at} onChange={set('expires_at')} />
-        <ErrorBanner error={err} />
+    <Card padding="none">
+      <div className="px-4 py-2.5 border-b border-g-border-weak bg-g-secondary/50 flex items-center justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <div className="font-medium text-sm">{license.customer || license.license_id}</div>
+          <div className="text-xs text-g-text-secondary flex items-center gap-2 mt-0.5">
+            <span className="font-mono">{license.license_id}</span>
+            {license.tier && <Badge color="blue">{license.tier}</Badge>}
+          </div>
+        </div>
+        <Button
+          variant={active ? 'ghost' : 'primary'}
+          icon={active ? <MdRefresh /> : <MdAdd />}
+          onClick={onRotate}
+          disabled={busy}
+        >
+          {busy ? (active ? 'Rotating…' : 'Generating…') : (active ? 'Rotate' : 'Generate token')}
+        </Button>
       </div>
-    </Modal>
+
+      <div className="px-4 py-3 text-sm">
+        {active ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1.5">
+            <Row label="Token ID"    value={<code className="font-mono text-xs">{active.token_id}</code>} />
+            <Row label="Status"      value={<Badge color="green">active</Badge>} />
+            <Row label="Created"     value={active.created_at ? new Date(active.created_at).toLocaleString() : '—'} />
+            <Row label="Expires"     value={active.expires_at ? new Date(active.expires_at).toLocaleString() : 'never'} />
+            <Row label="Last used"   value={active.last_used_at ? new Date(active.last_used_at).toLocaleString() : 'never'} />
+            <Row label="Description" value={active.description || '—'} />
+            <div className="md:col-span-2 pt-2">
+              <Button variant="danger" icon={<MdDelete />} onClick={onRevoke}>
+                Revoke without replacement
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <p className="text-g-text-secondary">No active credential.</p>
+        )}
+      </div>
+
+      {history.length > 0 && (
+        <div className="border-t border-g-border-weak">
+          <button
+            type="button"
+            onClick={() => setShowHistory((v) => !v)}
+            className="w-full px-4 py-2 text-left text-xs font-medium text-g-text-secondary hover:bg-g-hover transition-colors flex items-center gap-1.5"
+          >
+            {showHistory ? <MdExpandLess /> : <MdExpandMore />}
+            {showHistory ? 'Hide' : 'Show'} revoked credentials ({history.length})
+          </button>
+          {showHistory && (
+            <Table columns={historyColumns} rows={history} className="border-0 rounded-none" />
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function Row({ label, value }) {
+  return (
+    <div className="flex items-baseline gap-3 min-w-0">
+      <dt className="w-24 shrink-0 text-xs uppercase tracking-wider font-medium text-g-text-secondary">{label}</dt>
+      <dd className="min-w-0 flex-1 text-g-text break-all">{value}</dd>
+    </div>
   );
 }
 

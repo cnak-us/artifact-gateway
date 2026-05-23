@@ -203,6 +203,12 @@ func (*fakeStore) RevokeCustomerToken(context.Context, uuid.UUID) error { panic(
 func (*fakeStore) CountActiveCustomerTokens(context.Context) (int, error) {
 	panic("unused")
 }
+func (*fakeStore) ListActiveCustomerTokenForLicense(context.Context, uuid.UUID) (*store.CustomerToken, error) {
+	return nil, store.ErrNotFound
+}
+func (*fakeStore) RotateCustomerTokenForLicense(context.Context, uuid.UUID, *uuid.UUID, string, string, string) (uuid.UUID, error) {
+	panic("unused")
+}
 func (*fakeStore) ListGrantsForLicense(context.Context, uuid.UUID) ([]store.PackageGrant, error) {
 	panic("unused")
 }

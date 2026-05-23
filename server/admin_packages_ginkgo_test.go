@@ -130,6 +130,12 @@ func (*packagesFakeStore) TouchCustomerToken(context.Context, uuid.UUID) error {
 func (*packagesFakeStore) CountActiveCustomerTokens(context.Context) (int, error) {
 	panic("unused")
 }
+func (*packagesFakeStore) ListActiveCustomerTokenForLicense(context.Context, uuid.UUID) (*store.CustomerToken, error) {
+	panic("unused")
+}
+func (*packagesFakeStore) RotateCustomerTokenForLicense(context.Context, uuid.UUID, *uuid.UUID, string, string, string) (uuid.UUID, error) {
+	panic("unused")
+}
 func (*packagesFakeStore) ListGrantsForLicense(context.Context, uuid.UUID) ([]store.PackageGrant, error) {
 	panic("unused")
 }
@@ -266,7 +272,7 @@ var _ = Describe("POST /admin/packages", func() {
 			"display_name":           "CNAK Core",
 		})
 		resp := postPackage(string(body))
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		Expect(resp.StatusCode).To(Equal(http.StatusCreated))
 
@@ -291,14 +297,14 @@ var _ = Describe("POST /admin/packages", func() {
 	It("rejects a request missing slug/path/kind", func() {
 		// Missing slug — handler bundles the three required fields into one error.
 		resp := postPackage(`{"path":"ns/p","kind":"container","upstream_credential_id":"` + credID.String() + `"}`)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
 		Expect(st.inserts).To(BeEmpty())
 	})
 
 	It("rejects a request missing upstream_credential_id", func() {
 		resp := postPackage(`{"slug":"cnak-core","path":"cnak-us/cnak-core","kind":"container"}`)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
 		Expect(st.inserts).To(BeEmpty())
 	})
@@ -312,7 +318,7 @@ var _ = Describe("POST /admin/packages", func() {
 			"source":                 "github-release",
 		})
 		resp := postPackage(string(body))
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
 		Expect(st.inserts).To(BeEmpty())
 	})
@@ -327,7 +333,7 @@ var _ = Describe("POST /admin/packages", func() {
 			"github_repo":            "cnak-us/cnak-cli",
 		})
 		resp := postPackage(string(body))
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		Expect(resp.StatusCode).To(Equal(http.StatusCreated))
 		Expect(st.inserts).To(HaveLen(1))

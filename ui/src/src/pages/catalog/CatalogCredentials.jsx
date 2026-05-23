@@ -1,21 +1,19 @@
-import { useEffect, useState } from 'react';
-import { MdMail, MdWarning, MdDownload, MdKey, MdAccountCircle } from 'react-icons/md';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { MdDownload, MdKey, MdRefresh, MdAdd } from 'react-icons/md';
 import { useCatalogAuth } from '../../contexts/CatalogAuthContext.jsx';
 import { catalog } from '../../api/client.js';
 import CopyableCode from '../../components/CopyableCode.jsx';
 import Spinner from '../../components/Spinner.jsx';
 import ErrorBanner from '../../components/ErrorBanner.jsx';
+import Modal from '../../components/Modal.jsx';
+import Button from '../../components/Button.jsx';
+import { useConfirm } from '../../components/ConfirmDialog.jsx';
 
-// "How did this session arrive" — basic-auth customers carry an opaque token
-// id (e.g. "BB7Q4SCEEIANCDABRP3K"). OIDC contacts are stamped with their email
-// in that slot by the catalog session layer. We treat an "@" in the token_id
-// as the OIDC tell rather than plumbing a dedicated server field.
-function detectSessionKind(session) {
-  const tid = session?.token_id || session?.tokenId || '';
-  if (tid.includes('@')) return { kind: 'oidc', identity: tid };
-  return { kind: 'token', identity: tid };
-}
-
+// CatalogCredentials renders one card per license the session can act on
+// (session.licenses[]). Each card has its own "get / rotate" state machine —
+// rotating one license doesn't affect the others. The plaintext secret is
+// shown once in a modal; refreshing the page returns to the metadata-only
+// view because the secret only lives in component memory.
 export default function CatalogCredentials() {
   const { session } = useCatalogAuth();
   const [blob, setBlob] = useState(null);
@@ -30,80 +28,60 @@ export default function CatalogCredentials() {
     return () => { cancelled = true; };
   }, [session]);
 
-  if (!session) return null;
+  const licenses = useMemo(() => {
+    // Backend exposes session.licenses[] for multi-license users; fall back
+    // to a single synthetic entry when the (older / single-license) payload
+    // only carries top-level fields. This keeps the UI compatible with both.
+    if (Array.isArray(session?.licenses) && session.licenses.length > 0) {
+      return session.licenses;
+    }
+    if (session?.license_id) {
+      return [{
+        id: session.license_id, // best-effort; backend may also send a UUID via session.license.id
+        license_id: session.license_id,
+        customer: session.customer,
+        organization: session.organization,
+        tier: session.tier,
+        expires_at: session.expires_at,
+      }];
+    }
+    return [];
+  }, [session]);
 
-  const license = session.license || {};
-  const licenseId = session.license_id || license.id || license.license_id;
-  const customer = license.customer || session.customer;
-  const organization = license.organization || session.organization;
-  const tier = license.tier || session.tier;
-  const expiresLicense = license.expires_at || session.expires_at;
-  const expiresToken = session.token_expires_at;
-  const lastUsed = session.last_used_at;
-  const { kind, identity } = detectSessionKind(session);
+  if (!session) return null;
 
   return (
     <div className="max-w-3xl mx-auto px-6 py-10">
       <header className="mb-8">
         <h1 className="text-2xl font-semibold tracking-tight">My credential</h1>
         <p className="mt-2 text-sm text-g-text-secondary max-w-xl">
-          What you're signed in with, and the license that backs your access.
+          One docker-pull credential per license. Rotating a credential
+          immediately revokes the previous one — pulls using the old secret
+          start failing within seconds.
         </p>
       </header>
 
-      {/* Identity — adapts to OIDC vs token sessions. The basic-auth path
-          carries a docker-pull credential; the OIDC contact path doesn't. */}
-      <section className="bg-g-elevated border border-g-border-weak rounded">
-        <div className="px-5 py-4 border-b border-g-border-weak flex items-center gap-2">
-          {kind === 'oidc' ? <MdAccountCircle /> : <MdKey />}
-          <h2 className="text-sm font-semibold">
-            {kind === 'oidc' ? 'Signed in as' : 'Token'}
-          </h2>
+      {licenses.length > 1 && (
+        <div className="mb-6 px-4 py-3 rounded bg-g-blue-main/10 border border-g-blue-main/30 text-sm text-g-text">
+          You have credentials for <strong>{licenses.length}</strong> licenses.
+          Each is independent — rotate them separately.
         </div>
-        <dl className="divide-y divide-g-border-weak text-sm">
-          {kind === 'oidc' ? (
-            <>
-              <Row label="Email"   value={<code className="font-mono">{identity || '—'}</code>} />
-              <Row label="Method"  value={<span className="chip">OIDC sign-in</span>} />
-              <Row
-                label="Note"
-                value={
-                  <span className="text-g-text-secondary">
-                    You're on the trusted-contact allowlist for this license. To pull images
-                    with <code className="text-xs">docker login</code>, ask your administrator
-                    for a customer token.
-                  </span>
-                }
-              />
-            </>
-          ) : (
-            <>
-              <Row label="Token ID"  value={<code className="font-mono">{identity || '—'}</code>} />
-              <Row label="Secret"    value={<span className="text-g-text-disabled italic">hidden — only shown at issue time</span>} />
-              <Row label="Expires"   value={expiresToken ? new Date(expiresToken).toLocaleString() : <span className="text-g-text-disabled">never</span>} />
-              <Row label="Last used" value={lastUsed ? new Date(lastUsed).toLocaleString() : <span className="text-g-text-disabled">just now</span>} />
-            </>
-          )}
-        </dl>
-      </section>
+      )}
 
-      {/* License metadata — surfaces License ID (was previously hidden). */}
-      <section className="bg-g-elevated border border-g-border-weak rounded mt-6">
-        <div className="px-5 py-4 border-b border-g-border-weak">
-          <h2 className="text-sm font-semibold">License</h2>
-        </div>
-        <dl className="divide-y divide-g-border-weak text-sm">
-          <Row label="License ID" value={licenseId ? <code className="font-mono text-xs">{licenseId}</code> : '—'} />
-          <Row label="Customer"     value={customer || '—'} />
-          <Row label="Organization" value={organization || '—'} />
-          <Row label="Tier"         value={tier ? <span className="chip-accent">{tier}</span> : '—'} />
-          <Row label="Expires"      value={expiresLicense ? new Date(expiresLicense).toLocaleDateString() : <span className="text-g-text-disabled">never</span>} />
-        </dl>
-      </section>
+      <div className="space-y-6">
+        {licenses.map((lic) => (
+          <LicenseCredentialCard key={lic.id || lic.license_id} license={lic} />
+        ))}
+        {licenses.length === 0 && (
+          <p className="text-sm text-g-text-secondary">
+            No license is associated with this session.
+          </p>
+        )}
+      </div>
 
-      {/* License file — raw .lic blob, copyable + downloadable. The button is
-          the proper way to save the file; the inline view is for quick copy. */}
-      <section className="bg-g-elevated border border-g-border-weak rounded mt-6">
+      {/* License file — raw .lic blob. Unchanged from prior version; useful
+          for offline import into the CNAK admin UI. */}
+      <section className="bg-g-elevated border border-g-border-weak rounded mt-8">
         <div className="px-5 py-4 border-b border-g-border-weak flex items-center justify-between gap-2 flex-wrap">
           <div>
             <h2 className="text-sm font-semibold">License file</h2>
@@ -129,33 +107,195 @@ export default function CatalogCredentials() {
           ) : null}
         </div>
       </section>
-
-      {kind === 'token' && (
-        <section className="mt-8 p-4 bg-g-yellow-main/10 border border-g-yellow-main/30 rounded text-sm flex items-start gap-3">
-          <MdWarning className="text-g-yellow-text shrink-0 mt-0.5" />
-          <div className="text-g-text">
-            <p className="font-medium">Need to rotate this credential?</p>
-            <p className="mt-1 text-g-text-secondary">
-              Secret rotation is handled by your account manager. Contact us and we'll
-              issue a new token and revoke the old one.
-            </p>
-            <a
-              href="mailto:support@cnak.us"
-              className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-g-elevated border border-g-border-medium text-g-text hover:bg-g-hover transition-colors"
-            >
-              <MdMail /> support@cnak.us
-            </a>
-          </div>
-        </section>
-      )}
     </div>
+  );
+}
+
+// LicenseCredentialCard owns one license's credential state. Status:
+//   loading   — initial fetch
+//   none      — no active credential; "Create credential" button
+//   active    — show metadata + "Rotate credential" button
+//   error     — fetch/rotate failed; "Try again" button
+// After a successful create/rotate the plaintext secret is shown in a Modal;
+// dismissing the modal refetches metadata so the card returns to `active`.
+function LicenseCredentialCard({ license }) {
+  const confirm = useConfirm();
+  const [status, setStatus] = useState('loading');
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [pending, setPending] = useState(false);
+  const [revealed, setRevealed] = useState(null); // { token_id, secret, full_credential }
+
+  const refresh = useCallback(async () => {
+    setStatus('loading');
+    setErr(null);
+    try {
+      const res = await catalog.getCredential(license.id);
+      if (!res || !res.token_id) {
+        setData(null);
+        setStatus('none');
+      } else {
+        setData(res);
+        setStatus('active');
+      }
+    } catch (e) {
+      setErr(e);
+      setStatus('error');
+    }
+  }, [license.id]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const rotate = async () => {
+    if (status === 'active') {
+      const ok = await confirm({
+        title: 'Rotate credential?',
+        message:
+          `This revokes the current credential for ${license.customer || license.license_id} immediately. ` +
+          'Pulls using the old secret will start failing within seconds. ' +
+          'Make sure you have access to update wherever it is currently configured.',
+        confirmLabel: 'Rotate',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    setPending(true);
+    setErr(null);
+    try {
+      const res = await catalog.rotateCredential(license.id);
+      setRevealed(res);
+    } catch (e) {
+      setErr(e);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const onCloseReveal = async () => {
+    setRevealed(null);
+    await refresh();
+  };
+
+  return (
+    <section className="bg-g-elevated border border-g-border-weak rounded">
+      <div className="px-5 py-4 border-b border-g-border-weak flex items-center justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold flex items-center gap-2">
+            <MdKey className="text-base text-g-text-secondary" />
+            {license.customer || 'License'}
+            {license.tier && (
+              <span className="chip-accent text-[10px]">{license.tier}</span>
+            )}
+          </h2>
+          <p className="mt-0.5 text-xs text-g-text-disabled font-mono truncate">
+            {license.license_id}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {status === 'active' && (
+            <Button variant="ghost" onClick={rotate} disabled={pending} icon={<MdRefresh />}>
+              {pending ? 'Rotating…' : 'Rotate'}
+            </Button>
+          )}
+          {status === 'none' && (
+            <Button variant="primary" onClick={rotate} disabled={pending} icon={<MdAdd />}>
+              {pending ? 'Creating…' : 'Create credential'}
+            </Button>
+          )}
+        </div>
+      </div>
+
+      <div className="px-5 py-4 text-sm">
+        <ErrorBanner error={err} />
+        {status === 'loading' && <Spinner label="Loading credential" />}
+        {status === 'active' && data && (
+          <dl className="divide-y divide-g-border-weak">
+            <Row label="Token ID"  value={<code className="font-mono">{data.token_id}</code>} />
+            <Row label="Created"   value={data.created_at ? new Date(data.created_at).toLocaleString() : '—'} />
+            <Row label="Last used" value={data.last_used_at ? new Date(data.last_used_at).toLocaleString() : <span className="text-g-text-disabled">never</span>} />
+            <Row label="Expires"   value={data.expires_at ? new Date(data.expires_at).toLocaleString() : <span className="text-g-text-disabled">never</span>} />
+          </dl>
+        )}
+        {status === 'none' && !err && (
+          <p className="text-g-text-secondary">
+            No credential issued yet. Click <strong>Create credential</strong> to generate one.
+            You'll see the secret exactly once — save it before closing the dialog.
+          </p>
+        )}
+        {status === 'error' && (
+          <Button variant="ghost" onClick={refresh}>Try again</Button>
+        )}
+      </div>
+
+      <RevealedSecretModal
+        open={!!revealed}
+        license={license}
+        revealed={revealed}
+        onClose={onCloseReveal}
+      />
+    </section>
+  );
+}
+
+// RevealedSecretModal shows the plaintext secret exactly once and gates the
+// "Done" button behind a "I've saved this" checkbox so the user can't dismiss
+// without acknowledging it. aria-live=assertive surfaces the secret to screen
+// readers as soon as the modal opens.
+function RevealedSecretModal({ open, license, revealed, onClose }) {
+  const [ack, setAck] = useState(false);
+  useEffect(() => {
+    if (open) setAck(false);
+  }, [open]);
+
+  return (
+    <Modal
+      open={open}
+      onClose={() => { /* require explicit Done */ }}
+      title={`New credential for ${license?.customer || license?.license_id || 'license'}`}
+      description="Copy this now. You won't be able to see it again."
+      size="lg"
+      footer={
+        <>
+          <label className="inline-flex items-center gap-2 text-xs text-g-text-secondary mr-auto">
+            <input
+              type="checkbox"
+              checked={ack}
+              onChange={(e) => setAck(e.target.checked)}
+            />
+            I've saved this credential.
+          </label>
+          <Button variant="primary" disabled={!ack} onClick={onClose}>Done</Button>
+        </>
+      }
+    >
+      {revealed && (
+        <div className="space-y-4" aria-live="assertive">
+          <div>
+            <div className="text-xs uppercase tracking-wider font-medium text-g-text-secondary mb-1">Token ID</div>
+            <CopyableCode value={revealed.token_id} />
+          </div>
+          <div>
+            <div className="text-xs uppercase tracking-wider font-medium text-g-text-secondary mb-1">Secret</div>
+            <CopyableCode value={revealed.secret} />
+          </div>
+          <div>
+            <div className="text-xs uppercase tracking-wider font-medium text-g-text-secondary mb-1">docker login password</div>
+            <CopyableCode value={revealed.full_credential} />
+          </div>
+          <p className="text-xs text-g-text-secondary">
+            Use the docker login password as the password (any value works as
+            the username) when configuring docker, helm, or buildx.
+          </p>
+        </div>
+      )}
+    </Modal>
   );
 }
 
 function Row({ label, value }) {
   return (
-    <div className="px-5 py-3 flex items-baseline gap-4">
-      <dt className="w-32 shrink-0 text-xs uppercase tracking-wider font-medium text-g-text-secondary">{label}</dt>
+    <div className="px-0 py-3 flex items-baseline gap-4">
+      <dt className="w-28 shrink-0 text-xs uppercase tracking-wider font-medium text-g-text-secondary">{label}</dt>
       <dd className="min-w-0 flex-1 text-g-text break-all">{value}</dd>
     </div>
   );

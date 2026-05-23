@@ -28,6 +28,7 @@ const FIELD_MAP = {
   catalog_hero_eyebrow:  'catalogHeroEyebrow',
   html_title:            'htmlTitle',
   meta_description:      'metaDescription',
+  support_email:         'supportEmail',
 };
 
 function buildLogoComponent(svgMarkup) {

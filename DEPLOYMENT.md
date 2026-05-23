@@ -211,3 +211,37 @@ Key SLO metrics to alert on:
 - `license_check_failures_total{reason="expired"}` — expected when a
   customer's license lapses; spikes indicate a clock or NATS-cache
   issue.
+
+### Customer-token single-active enforcement (one-time)
+
+The `customer_tokens` table now has a partial unique index that allows at
+most one active (non-revoked) row per `license_id`. Fresh databases create
+the index on first boot with no action required.
+
+For databases that pre-date this constraint and contain licenses with `>1`
+active tokens, the server refuses to start until an operator explicitly
+acknowledges the cleanup:
+
+1. Start the new image. The process logs a report listing each
+   `(license_id, active_count)` tuple and prints the expected ACK value:
+   ```
+   customer_tokens single-active reconcile required
+     expected_ack=<sha256>
+     hint=set CUSTOMER_TOKENS_ACK_REVOKE=<sha256> and restart
+   ```
+2. Notify affected customers that older credentials will be revoked. The
+   reconciler keeps the **newest** active token per license (by
+   `created_at`) and sets `revoked_at = now()` on the rest.
+3. Restart with `CUSTOMER_TOKENS_ACK_REVOKE=<sha256>` set (e.g. via the
+   chart's `env` block on the Deployment). On boot the reconciler runs in
+   a single transaction, then creates the partial unique index. The ACK
+   value is tied to the exact `(license_id, count)` set so it cannot be
+   reused if the set of offenders changes between boots.
+4. Subsequent restarts no-op — the report query returns zero rows.
+
+From that point onward both customer-facing self-service rotation
+(`POST /catalog/api/credential/rotate`) and admin rotation
+(`POST /api/v1/customer-tokens/rotate`) atomically revoke any prior
+active row and insert the new one. The legacy `POST /api/v1/customer-tokens`
+endpoint still works but routes through the rotate path and returns a
+`Deprecation: true` header.

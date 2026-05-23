@@ -3,6 +3,10 @@ name: artifact-gateway
 description: Kubernetes-native OCI auth gateway that proxies ghcr.io for license-gated customer access
 type: application
 version: 0.1.0
+# appVersion is overridden at release time by .github/workflows/release.yml
+# (it stamps the same semver as the container image). The literal below is a
+# floor — useful for `helm template` runs from a clean checkout, but not
+# authoritative for published chart artifacts.
 appVersion: "0.0.7"
 kubeVersion: ">=1.24.0-0"
 keywords:

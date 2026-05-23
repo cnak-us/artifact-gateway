@@ -10,6 +10,11 @@ export class ApiError extends Error {
   }
 }
 
+// isMutating is true for verbs that change server state. We stamp these with
+// X-Requested-With so the server's CSRF defense passes — browsers won't send
+// custom headers cross-origin without a preflight, which the server can refuse.
+const mutatingVerbs = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
 export async function request(method, path, { body, headers, signal, raw } = {}) {
   const init = {
     method,
@@ -17,6 +22,9 @@ export async function request(method, path, { body, headers, signal, raw } = {})
     signal,
     headers: { Accept: 'application/json', ...(headers || {}) },
   };
+  if (mutatingVerbs.has(method.toUpperCase()) && !init.headers['X-Requested-With']) {
+    init.headers['X-Requested-With'] = 'fetch';
+  }
   if (body !== undefined) {
     if (body instanceof FormData || typeof body === 'string') {
       init.body = body;
@@ -120,7 +128,11 @@ export const admin = {
   deleteRootKey: (id) => api.delete(`/api/v1/root-keys/${id}`),
 
   listCustomerTokens: () => api.get('/api/v1/customer-tokens'),
+  // createCustomerToken is deprecated in favor of rotateCustomerToken;
+  // both endpoints now go through the same rotate path on the backend.
   createCustomerToken: (body) => api.post('/api/v1/customer-tokens', body),
+  rotateCustomerToken: (licenseId, body = {}) =>
+    api.post('/api/v1/customer-tokens/rotate', { license_id: licenseId, ...body }),
   deleteCustomerToken: (id) => api.delete(`/api/v1/customer-tokens/${id}`),
   previewCustomerToken: (id) => api.get(`/api/v1/customer-tokens/${id}/preview`),
 
@@ -217,4 +229,12 @@ export const catalog = {
   oidcProviders: () => api.get('/catalog/oidc-providers'),
   oidcStartUrl: (provider, returnTo = '/catalog') =>
     `/catalog/oidc/${encodeURIComponent(provider)}/start?return_to=${encodeURIComponent(returnTo)}`,
+
+  // Customer-facing credential self-service. getCredential returns metadata
+  // for the active token (or {token_id: null} if none); rotateCredential
+  // returns the plaintext secret exactly once.
+  getCredential: (licenseId) =>
+    api.get(`/catalog/api/credential?license_id=${encodeURIComponent(licenseId)}`),
+  rotateCredential: (licenseId) =>
+    api.post('/catalog/api/credential/rotate', { license_id: licenseId }),
 };

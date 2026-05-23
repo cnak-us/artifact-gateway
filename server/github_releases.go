@@ -169,7 +169,7 @@ func (g *GitHubReleasesClient) ListReleases(ctx context.Context, repo, pat strin
 		metrics.GitHubAPIRequestsTotal.WithLabelValues("upstream_error").Inc()
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if rlErr := recordRateLimit(resp); rlErr != nil {
 		metrics.GitHubAPIRequestsTotal.WithLabelValues("rate_limited").Inc()
@@ -221,7 +221,7 @@ func (g *GitHubReleasesClient) GetRelease(ctx context.Context, repo, tag, pat st
 		metrics.GitHubAPIRequestsTotal.WithLabelValues("upstream_error").Inc()
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if rlErr := recordRateLimit(resp); rlErr != nil {
 		metrics.GitHubAPIRequestsTotal.WithLabelValues("rate_limited").Inc()
@@ -272,7 +272,7 @@ func (g *GitHubReleasesClient) AssetDownloadURL(ctx context.Context, repo string
 		metrics.GitHubAPIRequestsTotal.WithLabelValues("upstream_error").Inc()
 		return "", 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if rlErr := recordRateLimit(resp); rlErr != nil {
 		metrics.GitHubAPIRequestsTotal.WithLabelValues("rate_limited").Inc()

@@ -158,6 +158,12 @@ func (*containersFakeStore) TouchCustomerToken(context.Context, uuid.UUID) error
 func (*containersFakeStore) CountActiveCustomerTokens(context.Context) (int, error) {
 	panic("unused")
 }
+func (*containersFakeStore) ListActiveCustomerTokenForLicense(context.Context, uuid.UUID) (*store.CustomerToken, error) {
+	panic("unused")
+}
+func (*containersFakeStore) RotateCustomerTokenForLicense(context.Context, uuid.UUID, *uuid.UUID, string, string, string) (uuid.UUID, error) {
+	panic("unused")
+}
 func (*containersFakeStore) ListGrantsForLicense(context.Context, uuid.UUID) ([]store.PackageGrant, error) {
 	panic("unused")
 }
@@ -294,7 +300,7 @@ var _ = Describe("Admin package container handlers", func() {
 	Describe("POST /packages/{id}/containers", func() {
 		It("creates a container row tagged source='' (UI-owned)", func() {
 			resp := postContainer(`{"alias":"backend","upstream_repo":"ns/backend","display_name":"Backend"}`)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusCreated))
 
 			Expect(st.upserts).To(HaveLen(1))
@@ -308,21 +314,21 @@ var _ = Describe("Admin package container handlers", func() {
 
 		It("rejects an empty alias", func() {
 			resp := postContainer(`{"alias":"","upstream_repo":"ns/x"}`)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
 			Expect(st.upserts).To(BeEmpty())
 		})
 
 		It("rejects an alias containing '/'", func() {
 			resp := postContainer(`{"alias":"has/slash","upstream_repo":"ns/x"}`)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
 			Expect(st.upserts).To(BeEmpty())
 		})
 
 		It("rejects an empty upstream_repo", func() {
 			resp := postContainer(`{"alias":"backend","upstream_repo":""}`)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
 			Expect(st.upserts).To(BeEmpty())
 		})
@@ -336,7 +342,7 @@ var _ = Describe("Admin package container handlers", func() {
 				{PackageID: pkgID, Alias: "worker", UpstreamRepo: "ns/worker", Source: "", CreatedAt: now, UpdatedAt: now},
 			}
 			resp := listContainers()
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
 			b, _ := io.ReadAll(resp.Body)
 			var got []struct {
@@ -352,7 +358,7 @@ var _ = Describe("Admin package container handlers", func() {
 	Describe("DELETE /packages/{id}/containers/{alias}", func() {
 		It("forwards the (id, alias) tuple to the store", func() {
 			resp := deleteContainer("backend")
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			Expect(resp.StatusCode).To(Equal(http.StatusNoContent))
 			Expect(st.deletes).To(HaveLen(1))
 			Expect(st.deletes[0]).To(Equal(deletedContainer{PackageID: pkgID, Alias: "backend"}))

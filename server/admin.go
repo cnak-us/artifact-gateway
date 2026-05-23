@@ -3,6 +3,7 @@ package server
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -44,6 +45,9 @@ type AdminDeps struct {
 	// uses it to mint a customer-flavored cookie when "viewing as customer"
 	// without affecting their admin session.
 	CatalogSessions *agoidc.Manager
+	// Revoker is shared with the OCI Deps so admin-driven rotate/revoke
+	// operations invalidate cached JWT row-revocation state immediately.
+	Revoker *TokenRevocationChecker
 }
 
 // MountAdmin mounts the /api/v1/* surface onto r.
@@ -111,7 +115,13 @@ func MountAdmin(r chi.Router, d AdminDeps) {
 
 			r.Route("/customer-tokens", func(r chi.Router) {
 				r.Get("/", listCustomerTokens(d))
+				// Legacy POST / is preserved but now routes through the
+				// rotate path so the "one active per license" invariant
+				// holds regardless of which endpoint the UI calls. The
+				// response sets `Deprecation: true` so newer clients can
+				// migrate to /rotate.
 				r.Post("/", createCustomerToken(d))
+				r.Post("/rotate", adminRotateCustomerToken(d))
 				r.Delete("/{id}", revokeCustomerToken(d))
 				r.Get("/{id}/preview", previewCustomerToken(d))
 			})
@@ -1234,6 +1244,10 @@ func listCustomerTokens(d AdminDeps) http.HandlerFunc {
 	}
 }
 
+// createCustomerToken — legacy endpoint kept for the existing UI/clients. It
+// now routes through RotateCustomerTokenForLicense so a second call for the
+// same license rotates rather than failing on the partial unique index. The
+// response includes a `Deprecation` header pointing clients at /rotate.
 func createCustomerToken(d AdminDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in customerTokenIn
@@ -1241,47 +1255,86 @@ func createCustomerToken(d AdminDeps) http.HandlerFunc {
 			writeJSONErr(w, http.StatusBadRequest, "license_id required")
 			return
 		}
-		// Ensure the license exists before we mint a credential against it.
-		if _, err := d.Store.GetLicense(r.Context(), in.LicenseID); err != nil {
-			writeJSONErr(w, http.StatusBadRequest, "license not found")
-			return
-		}
-		gen, err := auth.GenerateCustomerToken()
-		if err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, "generate failed")
-			return
-		}
-		hash, err := auth.HashSecret(gen.Secret)
-		if err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, "hash failed")
-			return
-		}
-		s := agoidc.SessionFrom(r.Context())
-		var createdBy *uuid.UUID
-		if s != nil && s.UserID != uuid.Nil {
-			id := s.UserID
-			createdBy = &id
-		}
-		row := &store.CustomerToken{
-			ID:          uuid.New(),
-			TokenID:     gen.TokenID,
-			SecretHash:  hash,
-			LicenseID:   in.LicenseID,
-			Description: in.Description,
-			ExpiresAt:   in.ExpiresAt,
-			CreatedBy:   createdBy,
-		}
-		if err := d.Store.InsertCustomerToken(r.Context(), row); err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		d.Auditor.LogResourceMutation(actorEmail(s), "create", "customer-token", row.ID.String(), row.TokenID, clientIP(r))
-		writeJSON(w, http.StatusCreated, customerTokenIssued{
-			customerTokenOut: customerTokenToOut(row),
-			Secret:           gen.Secret,
-			FullCredential:   gen.FullCredential,
-		})
+		w.Header().Set("Deprecation", "true")
+		w.Header().Set("Link", `</api/v1/customer-tokens/rotate>; rel="successor-version"`)
+		doAdminRotateCustomerToken(d, w, r, in)
 	}
+}
+
+// adminRotateCustomerToken is the canonical rotate endpoint. Body shape
+// matches createCustomerToken so the UI can switch with no DTO change.
+func adminRotateCustomerToken(d AdminDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var in customerTokenIn
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.LicenseID == uuid.Nil {
+			writeJSONErr(w, http.StatusBadRequest, "license_id required")
+			return
+		}
+		doAdminRotateCustomerToken(d, w, r, in)
+	}
+}
+
+// doAdminRotateCustomerToken is shared by the legacy POST / and the new
+// POST /rotate endpoints. It generates a fresh credential, atomically
+// revokes the previous active token (if any), and writes the audit row.
+// The plaintext secret is in the response exactly once; no-store headers
+// keep it from being cached on the path back to the browser.
+func doAdminRotateCustomerToken(d AdminDeps, w http.ResponseWriter, r *http.Request, in customerTokenIn) {
+	if _, err := d.Store.GetLicense(r.Context(), in.LicenseID); err != nil {
+		writeJSONErr(w, http.StatusBadRequest, "license not found")
+		return
+	}
+	gen, err := auth.GenerateCustomerToken()
+	if err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, "generate failed")
+		return
+	}
+	hash, err := auth.HashSecret(gen.Secret)
+	if err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, "hash failed")
+		return
+	}
+	s := agoidc.SessionFrom(r.Context())
+	var createdBy *uuid.UUID
+	if s != nil && s.UserID != uuid.Nil {
+		id := s.UserID
+		createdBy = &id
+	}
+	newRowID, err := d.Store.RotateCustomerTokenForLicense(
+		r.Context(), in.LicenseID, createdBy, in.Description, gen.TokenID, hash,
+	)
+	if err != nil {
+		if errors.Is(err, store.ErrRotateConcurrent) {
+			writeJSONErr(w, http.StatusConflict, "rotation in progress, retry")
+			return
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSONErr(w, http.StatusNotFound, "license not found")
+			return
+		}
+		writeJSONErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if d.Revoker != nil {
+		d.Revoker.BumpEpoch()
+	}
+	d.Auditor.LogResourceMutation(actorEmail(s), "rotate", "customer-token", in.LicenseID.String(), gen.TokenID, clientIP(r))
+
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, private")
+	w.Header().Set("Pragma", "no-cache")
+	row := &store.CustomerToken{
+		ID:          newRowID,
+		TokenID:     gen.TokenID,
+		LicenseID:   in.LicenseID,
+		Description: in.Description,
+		ExpiresAt:   in.ExpiresAt,
+		CreatedBy:   createdBy,
+	}
+	writeJSON(w, http.StatusCreated, customerTokenIssued{
+		customerTokenOut: customerTokenToOut(row),
+		Secret:           gen.Secret,
+		FullCredential:   gen.FullCredential,
+	})
 }
 
 func revokeCustomerToken(d AdminDeps) http.HandlerFunc {
@@ -1523,7 +1576,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func writeJSONErr(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	fmt.Fprintf(w, `{"error":%q}`, msg)
+	_, _ = fmt.Fprintf(w, `{"error":%q}`, msg)
 }
 
 func actorEmail(s *agoidc.Session) string {

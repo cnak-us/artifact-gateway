@@ -108,7 +108,7 @@ func (m acrMinter) aadAccessToken(ctx context.Context, tenant, clientID, clientS
 	if err != nil {
 		return "", fmt.Errorf("aad token: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return "", fmt.Errorf("aad token %s: %s", resp.Status, strings.TrimSpace(string(body)))
@@ -144,7 +144,7 @@ func (m acrMinter) acrRefreshToken(ctx context.Context, registry, tenant, aadTok
 	if err != nil {
 		return "", fmt.Errorf("acr exchange: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return "", fmt.Errorf("acr exchange %s: %s", resp.Status, strings.TrimSpace(string(body)))
@@ -182,7 +182,7 @@ func (m acrMinter) acrAccessToken(ctx context.Context, registry, refresh string)
 	if err != nil {
 		return "", 0, fmt.Errorf("acr token: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return "", 0, fmt.Errorf("acr token %s: %s", resp.Status, strings.TrimSpace(string(body)))

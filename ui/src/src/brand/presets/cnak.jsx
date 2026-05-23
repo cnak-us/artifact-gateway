@@ -33,6 +33,7 @@ const cnak = {
   catalogHeroEyebrow: 'Your CNAK distribution',
   htmlTitle: 'Artifact Gateway · CNAK',
   metaDescription: 'CNAK Artifact Gateway — licensed OCI distribution',
+  supportEmail: 'support@cnak.us',
   themeStorageKey: 'cnak.theme',
   accent: {
     light: { main: '56 113 220', text: '31 98 224' },

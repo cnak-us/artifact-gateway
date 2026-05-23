@@ -215,6 +215,11 @@ func main() {
 	publicRouter.Use(server.Logger(logger))
 	publicRouter.Use(middleware.Recoverer)
 
+	// Token-revocation checker enforces immediate cutoff when a customer
+	// token is rotated. 5s cache TTL bounds the per-request DB load; rotate
+	// handlers call BumpEpoch to invalidate sooner than the TTL window.
+	revoker := server.NewTokenRevocationChecker(st, 5*time.Second)
+
 	server.MountOCI(publicRouter, server.Deps{
 		Store:    st,
 		Signer:   signer,
@@ -225,6 +230,7 @@ func main() {
 		Cfg:      cfg,
 		Upstream: upstream,
 		Logger:   logger,
+		Revoker:  revoker,
 	})
 
 	// Wire the PostAuthCallback for the auto-login flow (Dex-first).
@@ -244,6 +250,7 @@ func main() {
 		Logger:          logger,
 		Upstream:        upstream,
 		CatalogSessions: catalogSessions,
+		Revoker:         revoker,
 	})
 
 	upstream.StartIssuerRefresh(rootCtx)
@@ -259,6 +266,7 @@ func main() {
 		Cfg:                 cfg,
 		Logger:              logger,
 		OIDCDefaultProvider: cfg.OIDCDefaultProvider,
+		Revoker:             revoker,
 	}
 	server.MountCatalog(publicRouter, catalogDeps)
 	server.MountCatalogOIDC(publicRouter, catalogDeps, oidcHandlers, oidcRegistry)

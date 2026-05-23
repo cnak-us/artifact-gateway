@@ -150,6 +150,10 @@ CREATE TABLE IF NOT EXISTS customer_tokens (
 
 CREATE INDEX IF NOT EXISTS customer_tokens_token_id_idx   ON customer_tokens (token_id);
 CREATE INDEX IF NOT EXISTS customer_tokens_license_id_idx ON customer_tokens (license_id);
+-- The partial unique index (one active token per license) is NOT created in
+-- this file because CREATE UNIQUE INDEX would fail on a pre-existing database
+-- with duplicates. pg.go EnsureSchema runs a reconcile gate first, then
+-- creates the index itself.
 
 CREATE TABLE IF NOT EXISTS package_grants (
     license_id  UUID NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
@@ -242,9 +246,14 @@ CREATE TABLE IF NOT EXISTS branding (
     accent_dark_main     TEXT,
     accent_dark_text     TEXT,
     logo_svg             TEXT,
+    support_email        TEXT,
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_by           TEXT
 );
+
+-- Idempotent upgrade for pre-support_email DBs.
+ALTER TABLE branding
+    ADD COLUMN IF NOT EXISTS support_email TEXT;
 
 INSERT INTO branding (id) VALUES (1)
 ON CONFLICT (id) DO NOTHING;

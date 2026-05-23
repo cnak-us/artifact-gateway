@@ -90,7 +90,14 @@ func Logger(logger *slog.Logger) func(http.Handler) http.Handler {
 // BearerJWT validates `Authorization: Bearer <jwt>` and stashes the claims on
 // the context. On failure it returns 401 with the OCI Www-Authenticate
 // challenge so docker/helm retry against /v2/token.
-func BearerJWT(signer *auth.JWTSigner, cfg *config.Config) func(http.Handler) http.Handler {
+//
+// In addition to signature/issuer/audience/expiry checks (delegated to
+// signer.Verify), this middleware enforces row-level revocation: if revoker
+// is non-nil, the customer_tokens row named by the JWT's TokenRowID claim is
+// looked up and the request is 401'd when the row is revoked or missing.
+// This makes credential rotation immediate — a rotated token's JWT stops
+// working on the next OCI request even though its signature is still valid.
+func BearerJWT(signer *auth.JWTSigner, cfg *config.Config, revoker *TokenRevocationChecker) func(http.Handler) http.Handler {
 	challenge := bearerChallenge(cfg.ExternalHostname, "")
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -105,6 +112,17 @@ func BearerJWT(signer *auth.JWTSigner, cfg *config.Config) func(http.Handler) ht
 			if err != nil {
 				writeBearerChallenge(w, challenge, http.StatusUnauthorized, "invalid or expired token")
 				return
+			}
+			if revoker != nil {
+				revoked, err := revoker.IsRevoked(r.Context(), claims.TokenRowID)
+				if err != nil {
+					writeBearerChallenge(w, challenge, http.StatusUnauthorized, "revocation check failed")
+					return
+				}
+				if revoked {
+					writeBearerChallenge(w, challenge, http.StatusUnauthorized, "credential rotated or revoked")
+					return
+				}
 			}
 			ctx := context.WithValue(r.Context(), ctxKeyOCIClaims, claims)
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -142,7 +160,27 @@ func writeBearerChallenge(w http.ResponseWriter, challenge string, status int, m
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 	w.WriteHeader(status)
-	fmt.Fprintf(w, `{"errors":[{"code":"UNAUTHORIZED","message":%q}]}`, msg)
+	_, _ = fmt.Fprintf(w, `{"errors":[{"code":"UNAUTHORIZED","message":%q}]}`, msg)
+}
+
+// RequireCustomHeader is CSRF defense-in-depth for cookie-authenticated
+// mutating endpoints. It rejects requests that don't carry the named header
+// (e.g. `X-Requested-With`). Browsers won't send custom headers cross-origin
+// without a CORS preflight, which the server can refuse — so a malicious
+// site cannot forge a credentialed POST from a logged-in user.
+//
+// Used on /catalog/api/* POST routes. The catalog UI's fetch wrapper sets
+// the header on every API call.
+func RequireCustomHeader(name string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get(name) == "" {
+				writeJSONErr(w, http.StatusForbidden, "missing "+name+" header")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // clientIP returns the best-effort remote address, preferring

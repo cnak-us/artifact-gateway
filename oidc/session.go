@@ -224,7 +224,7 @@ func (m *Manager) sign(payload []byte) []byte {
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	fmt.Fprintf(w, `{"error":%q}`, msg)
+	_, _ = fmt.Fprintf(w, `{"error":%q}`, msg)
 }
 
 // Context plumbing.

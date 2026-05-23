@@ -3,18 +3,36 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/cnak-us/artifact-gateway/audit"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// ErrRotateConcurrent is returned by RotateCustomerTokenForLicense when two
+// concurrent rotations race and the loser collides with the partial unique
+// index on (license_id WHERE revoked_at IS NULL). Handlers should map this to
+// HTTP 409 Conflict with a retry hint.
+var ErrRotateConcurrent = errors.New("customer-token rotation concurrent")
+
+// envAckRevoke is the env var that an operator must set on first boot to
+// acknowledge the one-active-per-license reconcile when the pre-existing
+// database has licenses with >1 active customer_tokens. The value must match
+// the sha256 of the dry-run report printed at boot.
+const envAckRevoke = "CUSTOMER_TOKENS_ACK_REVOKE"
 
 //go:embed schema.sql
 var schemaSQL string
@@ -54,10 +72,130 @@ func (p *PG) Pool() *pgxpool.Pool { return p.pool }
 // EnsureSchema applies the embedded schema.sql against the database. The
 // statements are idempotent (IF NOT EXISTS, ON CONFLICT DO NOTHING) so this is
 // a no-op once the schema is in place.
+//
+// After the schema is applied, EnsureSchema runs the customer_tokens
+// single-active reconcile gate (see reconcileCustomerTokensSingleActive) and
+// creates the customer_tokens_one_active_per_license_idx partial unique
+// index. The index is created here (not in schema.sql) so the reconcile gate
+// can run first; on a database with pre-existing duplicates the index would
+// otherwise fail.
 func (p *PG) EnsureSchema(ctx context.Context) error {
 	if _, err := p.pool.Exec(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
+	if err := p.reconcileCustomerTokensSingleActive(ctx); err != nil {
+		return err
+	}
+	if _, err := p.pool.Exec(ctx,
+		`CREATE UNIQUE INDEX IF NOT EXISTS customer_tokens_one_active_per_license_idx
+		   ON customer_tokens (license_id) WHERE revoked_at IS NULL`); err != nil {
+		return fmt.Errorf("create one-active-per-license index: %w", err)
+	}
+	return nil
+}
+
+// reconcileCustomerTokensSingleActive enforces the "one active customer_token
+// per license" invariant at boot.
+//
+// On a fresh or already-conforming database this is a no-op. On a database
+// that pre-dates the invariant — where some licenses have >1 active tokens —
+// the function emits a report, computes a sha256 ACK from the report, and
+// refuses to continue unless the operator sets CUSTOMER_TOKENS_ACK_REVOKE to
+// that ACK. When the ACK matches, the function keeps the newest active token
+// per license (by created_at DESC) and sets revoked_at=now() on the rest.
+//
+// The ACK is computed from the (license_id, count) tuples so any change to
+// the set of offending licenses between boots invalidates the previous ACK —
+// the operator must re-confirm against the current report. This is deliberate:
+// it prevents a stale ACK from accidentally revoking new duplicates.
+func (p *PG) reconcileCustomerTokensSingleActive(ctx context.Context) error {
+	rows, err := p.pool.Query(ctx,
+		`SELECT license_id, COUNT(*)::int
+		   FROM customer_tokens
+		  WHERE revoked_at IS NULL
+		  GROUP BY license_id
+		 HAVING COUNT(*) > 1
+		  ORDER BY license_id`)
+	if err != nil {
+		return fmt.Errorf("scan duplicate customer_tokens: %w", err)
+	}
+	type dup struct {
+		LicenseID uuid.UUID
+		Count     int
+	}
+	var dups []dup
+	for rows.Next() {
+		var d dup
+		if err := rows.Scan(&d.LicenseID, &d.Count); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan duplicate row: %w", err)
+		}
+		dups = append(dups, d)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate duplicates: %w", err)
+	}
+	if len(dups) == 0 {
+		return nil
+	}
+
+	sort.Slice(dups, func(i, j int) bool {
+		return dups[i].LicenseID.String() < dups[j].LicenseID.String()
+	})
+	h := sha256.New()
+	for _, d := range dups {
+		_, _ = fmt.Fprintf(h, "%s|%d\n", d.LicenseID, d.Count)
+	}
+	ack := hex.EncodeToString(h.Sum(nil))
+
+	if os.Getenv(envAckRevoke) != ack {
+		slog.Error("customer_tokens single-active reconcile required",
+			"duplicates", len(dups),
+			"expected_ack", ack,
+			"hint", "review each license, notify affected customers, then set "+envAckRevoke+"=<ack> and restart")
+		for _, d := range dups {
+			slog.Error("customer_tokens duplicate",
+				"license_id", d.LicenseID,
+				"active_count", d.Count)
+		}
+		return fmt.Errorf("customer_tokens have >1 active rows for %d license(s); set %s=%s to acknowledge revocation of older tokens",
+			len(dups), envAckRevoke, ack)
+	}
+
+	// ACK matches — keep the newest active token per offending license,
+	// revoke the rest. Done in a single tx so an interruption leaves a
+	// well-defined state.
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin reconcile tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var revoked int64
+	for _, d := range dups {
+		tag, err := tx.Exec(ctx,
+			`UPDATE customer_tokens
+			    SET revoked_at = now(), updated_at = now()
+			  WHERE license_id = $1
+			    AND revoked_at IS NULL
+			    AND id <> (
+			      SELECT id FROM customer_tokens
+			       WHERE license_id = $1 AND revoked_at IS NULL
+			       ORDER BY created_at DESC, id DESC
+			       LIMIT 1
+			    )`, d.LicenseID)
+		if err != nil {
+			return fmt.Errorf("reconcile license %s: %w", d.LicenseID, err)
+		}
+		revoked += tag.RowsAffected()
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit reconcile tx: %w", err)
+	}
+	slog.Warn("customer_tokens reconcile complete",
+		"licenses_affected", len(dups),
+		"tokens_revoked", revoked,
+		"ack", ack)
 	return nil
 }
 
@@ -881,6 +1019,83 @@ func (p *PG) CountActiveCustomerTokens(ctx context.Context) (int, error) {
 	return n, err
 }
 
+// ListActiveCustomerTokenForLicense returns the at-most-one active token for
+// licenseID. Backed by the partial unique index, but we also use LIMIT 1 as
+// defense-in-depth in case the index hasn't been created yet (boot ordering).
+func (p *PG) ListActiveCustomerTokenForLicense(ctx context.Context, licenseID uuid.UUID) (*CustomerToken, error) {
+	row := p.pool.QueryRow(ctx,
+		`SELECT `+tokenCols+` FROM customer_tokens
+		  WHERE license_id=$1 AND revoked_at IS NULL
+		  ORDER BY created_at DESC LIMIT 1`, licenseID)
+	return scanToken(row)
+}
+
+// RotateCustomerTokenForLicense atomically revokes the active token for the
+// license (if any) and inserts a new one. The caller supplies tokenID and
+// secretHash so the auth import stays in the handler layer.
+//
+// Concurrency model: two rotates against the same license race on the partial
+// unique customer_tokens_one_active_per_license_idx. The winner commits; the
+// loser's INSERT raises SQLSTATE 23505 (unique_violation), which we map to
+// ErrRotateConcurrent so handlers return 409 Conflict + retry hint instead of
+// a generic 500. Tx isolation is READ COMMITTED (the default) — the partial
+// unique index is the real serialization point, and SERIALIZABLE would
+// produce spurious 40001 errors here.
+func (p *PG) RotateCustomerTokenForLicense(ctx context.Context, licenseID uuid.UUID,
+	createdBy *uuid.UUID, description, tokenID, secretHash string,
+) (uuid.UUID, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("begin rotate tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Verify license exists and is not revoked. FOR SHARE so a concurrent
+	// license-revoke can't slip in between the check and the insert.
+	var n int
+	if err := tx.QueryRow(ctx,
+		`SELECT 1 FROM licenses
+		  WHERE id=$1 AND revoked_at IS NULL
+		  FOR SHARE`, licenseID).Scan(&n); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, ErrNotFound
+		}
+		return uuid.Nil, fmt.Errorf("lookup license for rotate: %w", err)
+	}
+
+	// Revoke any active rows. Zero rows is legal — first-issue path.
+	if _, err := tx.Exec(ctx,
+		`UPDATE customer_tokens
+		    SET revoked_at = now(), updated_at = now()
+		  WHERE license_id = $1 AND revoked_at IS NULL`, licenseID); err != nil {
+		return uuid.Nil, fmt.Errorf("revoke previous active token: %w", err)
+	}
+
+	newID := uuid.New()
+	now := time.Now().UTC()
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO customer_tokens
+		   (id, token_id, secret_hash, license_id, description,
+		    expires_at, revoked_at, last_used_at, created_by,
+		    created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5, NULL, NULL, NULL, $6, $7, $7)`,
+		newID, tokenID, secretHash, licenseID, description, createdBy, now); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return uuid.Nil, ErrRotateConcurrent
+		}
+		return uuid.Nil, fmt.Errorf("insert rotated token: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return uuid.Nil, ErrRotateConcurrent
+		}
+		return uuid.Nil, fmt.Errorf("commit rotate tx: %w", err)
+	}
+	return newID, nil
+}
+
 // ---------- license contacts ----------
 
 const licenseContactCols = `license_id, email, name, source, created_at, updated_at`
@@ -1161,7 +1376,7 @@ func (p *PG) DeleteStaticAdmin(ctx context.Context, id uuid.UUID) error {
 const brandingCols = `product_name, vendor, vendor_short, footer_tagline, embedded_tagline,
 	catalog_hero_eyebrow, html_title, meta_description,
 	accent_light_main, accent_light_text, accent_dark_main, accent_dark_text,
-	logo_svg, updated_at, updated_by`
+	logo_svg, support_email, updated_at, updated_by`
 
 // nullableString unwraps a sql.NullString to an empty string when NULL — the
 // JSON layer treats "" as "use preset default", so we don't surface NULL to
@@ -1190,12 +1405,13 @@ func (p *PG) GetBranding(ctx context.Context) (*Branding, error) {
 		productName, vendor, vendorShort, footerTagline, embeddedTagline                 sql.NullString
 		catalogHeroEyebrow, htmlTitle, metaDescription                                   sql.NullString
 		accentLightMain, accentLightText, accentDarkMain, accentDarkText, logoSVG, upBy sql.NullString
+		supportEmail                                                                     sql.NullString
 	)
 	err := p.pool.QueryRow(ctx, `SELECT `+brandingCols+` FROM branding WHERE id = 1`).Scan(
 		&productName, &vendor, &vendorShort, &footerTagline, &embeddedTagline,
 		&catalogHeroEyebrow, &htmlTitle, &metaDescription,
 		&accentLightMain, &accentLightText, &accentDarkMain, &accentDarkText,
-		&logoSVG, &b.UpdatedAt, &upBy,
+		&logoSVG, &supportEmail, &b.UpdatedAt, &upBy,
 	)
 	if err != nil {
 		if errors.Is(mapErr(err), ErrNotFound) {
@@ -1216,6 +1432,7 @@ func (p *PG) GetBranding(ctx context.Context) (*Branding, error) {
 	b.AccentDarkMain = nullableString(accentDarkMain)
 	b.AccentDarkText = nullableString(accentDarkText)
 	b.LogoSVG = nullableString(logoSVG)
+	b.SupportEmail = nullableString(supportEmail)
 	b.UpdatedBy = nullableString(upBy)
 	return &b, nil
 }
@@ -1232,9 +1449,9 @@ func (p *PG) SetBranding(ctx context.Context, b *Branding) error {
 		   id, product_name, vendor, vendor_short, footer_tagline,
 		   embedded_tagline, catalog_hero_eyebrow, html_title, meta_description,
 		   accent_light_main, accent_light_text, accent_dark_main, accent_dark_text,
-		   logo_svg, updated_at, updated_by
+		   logo_svg, support_email, updated_at, updated_by
 		 ) VALUES (
-		   1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+		   1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
 		 )
 		 ON CONFLICT (id) DO UPDATE SET
 		   product_name = EXCLUDED.product_name, vendor = EXCLUDED.vendor,
@@ -1247,12 +1464,13 @@ func (p *PG) SetBranding(ctx context.Context, b *Branding) error {
 		   accent_dark_main = EXCLUDED.accent_dark_main,
 		   accent_dark_text = EXCLUDED.accent_dark_text,
 		   logo_svg = EXCLUDED.logo_svg,
+		   support_email = EXCLUDED.support_email,
 		   updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by`,
 		nsFrom(b.ProductName), nsFrom(b.Vendor), nsFrom(b.VendorShort), nsFrom(b.FooterTagline),
 		nsFrom(b.EmbeddedTagline), nsFrom(b.CatalogHeroEyebrow), nsFrom(b.HTMLTitle),
 		nsFrom(b.MetaDescription), nsFrom(b.AccentLightMain), nsFrom(b.AccentLightText),
 		nsFrom(b.AccentDarkMain), nsFrom(b.AccentDarkText), nsFrom(b.LogoSVG),
-		now, nsFrom(b.UpdatedBy),
+		nsFrom(b.SupportEmail), now, nsFrom(b.UpdatedBy),
 	)
 	return err
 }

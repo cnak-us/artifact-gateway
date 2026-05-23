@@ -142,7 +142,7 @@ func (g *GitLabReleasesClient) ListReleases(ctx context.Context, baseURL, repo, 
 		metrics.GitLabAPIRequestsTotal.WithLabelValues("upstream_error").Inc()
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		metrics.GitLabAPIRequestsTotal.WithLabelValues("upstream_error").Inc()
@@ -194,7 +194,7 @@ func (g *GitLabReleasesClient) GetRelease(ctx context.Context, baseURL, repo, ta
 		metrics.GitLabAPIRequestsTotal.WithLabelValues("upstream_error").Inc()
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		metrics.GitLabAPIRequestsTotal.WithLabelValues("upstream_error").Inc()
@@ -251,7 +251,7 @@ func (g *GitLabReleasesClient) assetURLForRelease(ctx context.Context, baseURL, 
 		metrics.GitLabAPIRequestsTotal.WithLabelValues("upstream_error").Inc()
 		return "", 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		metrics.GitLabAPIRequestsTotal.WithLabelValues("upstream_error").Inc()
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))

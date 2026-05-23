@@ -16,6 +16,7 @@ const EMPTY = {
   accent_light_main: '', accent_light_text: '',
   accent_dark_main: '', accent_dark_text: '',
   logo_svg: '',
+  support_email: '',
 };
 
 // Field placeholders sourced from the CNAK preset so admins see what the
@@ -33,6 +34,7 @@ const PLACEHOLDERS = {
   accent_light_text: '31 98 224',
   accent_dark_main: '61 113 217',
   accent_dark_text: '110 159 255',
+  support_email: 'support@cnak.us',
 };
 
 function tripletToHex(t) {
@@ -197,6 +199,17 @@ export default function Customization() {
             <Input label="Footer tagline" value={form.footer_tagline} onChange={set('footer_tagline')} placeholder={PLACEHOLDERS.footer_tagline} />
             <Input label="Sidebar embedded tagline" value={form.embedded_tagline} onChange={set('embedded_tagline')} placeholder={PLACEHOLDERS.embedded_tagline} />
             <Input label="Catalog hero eyebrow" value={form.catalog_hero_eyebrow} onChange={set('catalog_hero_eyebrow')} placeholder={PLACEHOLDERS.catalog_hero_eyebrow} />
+          </Section>
+
+          <Section title="Customer support">
+            <Input
+              label="Support email"
+              type="email"
+              value={form.support_email}
+              onChange={set('support_email')}
+              placeholder={PLACEHOLDERS.support_email}
+              hint="Shown to unlicensed users on the catalog gate and on the credential page."
+            />
           </Section>
 
           <Section title="Accent colors">

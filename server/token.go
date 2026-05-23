@@ -165,7 +165,7 @@ func (h *TokenHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	signed, expiresIn, issuedAt, err := h.Signer.Mint(tokenID, granted)
+	signed, expiresIn, issuedAt, err := h.Signer.Mint(tokenID, ct.ID, granted)
 	if err != nil {
 		h.Logger.Error("token mint failed", "err", err, "token_id", tokenID)
 		metrics.TokenMintsTotal.WithLabelValues("denied_license").Inc()
@@ -288,7 +288,7 @@ func writeDenied(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 	w.WriteHeader(status)
-	fmt.Fprintf(w, `{"errors":[{"code":"DENIED","message":%q}]}`, msg)
+	_, _ = fmt.Fprintf(w, `{"errors":[{"code":"DENIED","message":%q}]}`, msg)
 }
 
 func licenseFailureReason(err error) string {

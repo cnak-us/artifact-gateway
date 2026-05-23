@@ -18,10 +18,25 @@ type Access struct {
 	Actions []string `json:"actions"`
 }
 
+// ociClaimsVersion is the current OCIClaims schema version. Verify rejects
+// tokens whose `v` claim is not equal to this; bump when the claim shape
+// changes in a way that requires existing tokens to be rotated out.
+const ociClaimsVersion = 2
+
 // OCIClaims is the full claim set of a minted bearer JWT.
+//
+// TokenRowID is the customer_tokens.id (UUID, not the public token_id) and
+// lets the BearerJWT middleware enforce row-level revocation on every OCI
+// request. A rotated/revoked row immediately invalidates the JWT regardless
+// of its remaining TTL — required so rotation actually rotates.
+//
+// Ver pins the claim schema so a future incompatible change can reject older
+// tokens cleanly.
 type OCIClaims struct {
 	jwt.RegisteredClaims
-	Access []Access `json:"access"`
+	Access     []Access  `json:"access"`
+	Ver        int       `json:"v"`
+	TokenRowID uuid.UUID `json:"trid,omitempty"`
 }
 
 // JWTSigner mints and verifies OCI bearer JWTs (HMAC-SHA256).
@@ -63,10 +78,17 @@ func NewJWTSigner(secretHex string, issuer, audience string, ttl time.Duration) 
 	}, nil
 }
 
-// Mint produces a signed JWT for subject (the customer token_id) with the
-// given access grants. Returns the encoded token, its lifetime in seconds (for
-// the OCI token-response `expires_in`), and the issuedAt timestamp.
-func (s *JWTSigner) Mint(subject string, access []Access) (string, int, time.Time, error) {
+// Mint produces a signed JWT for subject (the customer token_id) bound to the
+// customer_tokens row identified by tokenRowID with the given access grants.
+// Returns the encoded token, its lifetime in seconds (for the OCI
+// token-response `expires_in`), and the issuedAt timestamp.
+//
+// tokenRowID must be non-nil; an all-zero UUID is rejected so the BearerJWT
+// middleware can rely on it for revocation lookups.
+func (s *JWTSigner) Mint(subject string, tokenRowID uuid.UUID, access []Access) (string, int, time.Time, error) {
+	if tokenRowID == uuid.Nil {
+		return "", 0, time.Time{}, errors.New("auth: jwt mint requires non-nil token row id")
+	}
 	now := time.Now().UTC()
 	exp := now.Add(s.ttl)
 	jti, err := uuid.NewRandom()
@@ -83,7 +105,9 @@ func (s *JWTSigner) Mint(subject string, access []Access) (string, int, time.Tim
 			ExpiresAt: jwt.NewNumericDate(exp),
 			ID:        jti.String(),
 		},
-		Access: access,
+		Access:     access,
+		Ver:        ociClaimsVersion,
+		TokenRowID: tokenRowID,
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := tok.SignedString(s.secret)
@@ -166,7 +190,9 @@ func (s *JWTSigner) VerifyDownloadURL(token string) (*DownloadURLClaims, error) 
 }
 
 // Verify parses and validates a token against the signer's key, issuer, and
-// audience. It returns the populated claim set on success.
+// audience. It returns the populated claim set on success. Tokens whose `v`
+// claim is missing or does not equal ociClaimsVersion are rejected — this
+// forces in-flight pre-upgrade tokens to be re-minted.
 func (s *JWTSigner) Verify(token string) (*OCIClaims, error) {
 	parser := jwt.NewParser(
 		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
@@ -180,6 +206,12 @@ func (s *JWTSigner) Verify(token string) (*OCIClaims, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+	if claims.Ver != ociClaimsVersion {
+		return nil, fmt.Errorf("auth: jwt schema version %d not accepted (want %d)", claims.Ver, ociClaimsVersion)
+	}
+	if claims.TokenRowID == uuid.Nil {
+		return nil, errors.New("auth: jwt missing token row id")
 	}
 	return claims, nil
 }

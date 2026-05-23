@@ -180,7 +180,7 @@ func (u *Upstream) Proxy(w http.ResponseWriter, r *http.Request, pkg *store.Pack
 			}
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	metrics.UpstreamRequestLatency.WithLabelValues(endpoint, strconv.Itoa(resp.StatusCode)).Observe(time.Since(start).Seconds())
 
 	switch endpoint {

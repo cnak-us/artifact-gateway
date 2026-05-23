@@ -243,7 +243,7 @@ func (b *BearerExchangeAuthenticator) mintToken(ctx context.Context, ch *parsedB
 	if err != nil {
 		return "", 0, fmt.Errorf("realm request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return "", 0, fmt.Errorf("realm %s returned %s: %s", u.Host, resp.Status, strings.TrimSpace(string(body)))
