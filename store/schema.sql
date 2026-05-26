@@ -111,19 +111,24 @@ CREATE INDEX IF NOT EXISTS package_containers_pkg_idx ON package_containers (pac
 CREATE INDEX IF NOT EXISTS package_containers_source_idx ON package_containers (source);
 
 CREATE TABLE IF NOT EXISTS licenses (
-    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    license_id    TEXT NOT NULL UNIQUE,
-    customer      TEXT NOT NULL DEFAULT '',
-    organization  TEXT NOT NULL DEFAULT '',
-    tier          TEXT NOT NULL DEFAULT '',
-    expires_at    TIMESTAMPTZ NULL,
-    lic_blob      TEXT NOT NULL,
-    revoked_at    TIMESTAMPTZ NULL,
+    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    license_id              TEXT NOT NULL UNIQUE,
+    customer                TEXT NOT NULL DEFAULT '',
+    organization            TEXT NOT NULL DEFAULT '',
+    tier                    TEXT NOT NULL DEFAULT '',
+    expires_at              TIMESTAMPTZ NULL,
+    lic_blob                TEXT NOT NULL,
+    revoked_at              TIMESTAMPTZ NULL,
     -- source tags the row owner: '' (legacy / admin-UI-created) or 'manifest'
     -- (reconciler-owned). Prune passes only delete 'manifest' rows.
-    source        TEXT NOT NULL DEFAULT '',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    source                  TEXT NOT NULL DEFAULT '',
+    -- customer_rotate_enabled toggles whether the licensee can self-rotate
+    -- their own customer credential from the catalog. Defaults to TRUE so
+    -- existing licenses keep current behavior; demo/shared licenses get
+    -- flipped to FALSE.
+    customer_rotate_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS licenses_active_expires_idx
@@ -133,6 +138,10 @@ CREATE INDEX IF NOT EXISTS licenses_active_expires_idx
 -- Idempotent upgrade for pre-source DBs.
 ALTER TABLE licenses
     ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '';
+
+-- Idempotent upgrade for pre-customer_rotate_enabled DBs.
+ALTER TABLE licenses
+    ADD COLUMN IF NOT EXISTS customer_rotate_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 
 CREATE TABLE IF NOT EXISTS customer_tokens (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),

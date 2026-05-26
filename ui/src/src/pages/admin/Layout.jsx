@@ -13,7 +13,6 @@ import Button from '../../components/Button.jsx';
 import TopBar from '../../components/TopBar.jsx';
 import ThemeToggle from '../../components/ThemeToggle.jsx';
 import CommandPalette from '../../components/CommandPalette.jsx';
-import { brand } from '../../brand/index.js';
 
 // Two logical groups separated visually: day-to-day operations on top, system
 // and observability on the bottom. Root keys live as a tab inside Licenses, so
@@ -147,9 +146,6 @@ export default function AdminLayout() {
               </div>
             ))}
           </nav>
-          <div className="p-3 border-t border-g-border-weak text-[11px] text-g-text-disabled">
-            {brand.embeddedTagline}
-          </div>
         </aside>
 
         <main className="flex-1 overflow-auto p-6 min-w-0">

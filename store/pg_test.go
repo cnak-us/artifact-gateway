@@ -80,12 +80,13 @@ var _ = Describe("Postgres store", func() {
 		// license
 		exp := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
 		lic := &store.License{
-			LicenseID:    "lic-" + uuid.NewString(),
-			Customer:     "Acme",
-			Organization: "Acme Org",
-			Tier:         "enterprise",
-			ExpiresAt:    &exp,
-			LicBlob:      "payload.signature",
+			LicenseID:             "lic-" + uuid.NewString(),
+			Customer:              "Acme",
+			Organization:          "Acme Org",
+			Tier:                  "enterprise",
+			ExpiresAt:             &exp,
+			LicBlob:               "payload.signature",
+			CustomerRotateEnabled: true,
 		}
 		Expect(pg.InsertLicense(ctx, lic)).To(Succeed())
 

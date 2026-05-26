@@ -99,6 +99,7 @@ func MountAdmin(r chi.Router, d AdminDeps) {
 				r.Post("/issue", issueLicense(d))
 				r.Get("/{id}", getLicense(d))
 				r.Delete("/{id}", revokeLicense(d))
+				r.Patch("/{id}/customer-rotate", patchLicenseCustomerRotate(d))
 				r.Get("/{id}/grants", listGrants(d))
 				r.Put("/{id}/grants", putGrants(d))
 				r.Get("/{id}/contacts", listContacts(d))
@@ -669,6 +670,11 @@ func createPackage(d AdminDeps) http.HandlerFunc {
 	}
 }
 
+// patchPackage applies a full-body update to a package. The admin UI sends
+// the complete form on every save, so absent-vs-empty semantics aren't worth
+// the complexity of a pointer DTO here — we just overwrite every editable
+// field and validate the required ones. Fields the admin UI does not show
+// (CreatedAt, ID, ManagedBy) remain untouched.
 func patchPackage(d AdminDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -686,45 +692,40 @@ func patchPackage(d AdminDeps) http.HandlerFunc {
 			writeJSONErr(w, http.StatusBadRequest, "invalid body")
 			return
 		}
-		// Patch: only mutate fields actually supplied.
-		if in.DisplayName != "" {
-			existing.DisplayName = in.DisplayName
+		if in.Slug == "" || in.Path == "" || in.Kind == "" {
+			writeJSONErr(w, http.StatusBadRequest, "slug, path, kind required")
+			return
 		}
-		if in.Description != "" {
-			existing.Description = in.Description
+		if in.UpstreamCredentialID == uuid.Nil {
+			writeJSONErr(w, http.StatusBadRequest, "upstream_credential_id required")
+			return
 		}
-		if in.ReleaseNotesURL != "" {
-			existing.ReleaseNotesURL = in.ReleaseNotesURL
+		source := in.Source
+		if source == "" {
+			source = "oci"
 		}
-		if in.InstallInstructionsMD != "" {
-			existing.InstallInstructionsMD = in.InstallInstructionsMD
-		}
-		if in.UpstreamCredentialID != uuid.Nil {
-			existing.UpstreamCredentialID = in.UpstreamCredentialID
-		}
-		if in.Source != "" {
-			existing.Source = in.Source
-		}
-		// UpstreamRepo: for OCI packages an empty string is meaningful
-		// (multi-container mode — child container rows carry the upstreams),
-		// so don't gate on "". For release sources upstream_repo is unused,
-		// so the empty-as-not-supplied convention is preserved there.
-		if existing.Source == "" || existing.Source == "oci" {
-			existing.UpstreamRepo = in.UpstreamRepo
-		} else if in.UpstreamRepo != "" {
-			existing.UpstreamRepo = in.UpstreamRepo
-		}
-		if in.GitHubRepo != "" {
+		existing.Slug = in.Slug
+		existing.Path = in.Path
+		existing.Kind = in.Kind
+		existing.Source = source
+		existing.UpstreamCredentialID = in.UpstreamCredentialID
+		existing.DisplayName = in.DisplayName
+		existing.Description = in.Description
+		existing.ReleaseNotesURL = in.ReleaseNotesURL
+		existing.InstallInstructionsMD = in.InstallInstructionsMD
+		// Release-vs-OCI partition: only one set of upstream fields is
+		// meaningful at a time. Zero the inactive side so toggling source
+		// doesn't leave stale fields behind.
+		if source == "github-release" || source == "gitlab-release" {
+			existing.UpstreamRepo = ""
 			existing.GitHubRepo = in.GitHubRepo
-		}
-		if in.ReleasePattern != "" {
 			existing.ReleasePattern = in.ReleasePattern
-		}
-		if in.AssetPattern != "" {
 			existing.AssetPattern = in.AssetPattern
-		}
-		if in.Kind != "" {
-			existing.Kind = in.Kind
+		} else {
+			existing.UpstreamRepo = in.UpstreamRepo
+			existing.GitHubRepo = ""
+			existing.ReleasePattern = ""
+			existing.AssetPattern = ""
 		}
 		if err := d.Store.UpdatePackage(r.Context(), existing); err != nil {
 			writeJSONErr(w, http.StatusInternalServerError, err.Error())
@@ -764,6 +765,9 @@ type licenseDTO struct {
 	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
 	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
+	// CustomerRotateEnabled mirrors licenses.customer_rotate_enabled. Drives
+	// the admin UI's per-license toggle; flip via PATCH /licenses/{id}/customer-rotate.
+	CustomerRotateEnabled bool `json:"customer_rotate_enabled"`
 }
 
 type licenseIn struct {
@@ -775,6 +779,51 @@ func licenseToDTO(l *store.License) licenseDTO {
 		ID: l.ID, LicenseID: l.LicenseID, Customer: l.Customer,
 		Organization: l.Organization, Tier: l.Tier, ExpiresAt: l.ExpiresAt,
 		RevokedAt: l.RevokedAt, CreatedAt: l.CreatedAt,
+		CustomerRotateEnabled: l.CustomerRotateEnabled,
+	}
+}
+
+// customerRotateIn is the body of PATCH /licenses/{id}/customer-rotate.
+type customerRotateIn struct {
+	Enabled bool `json:"enabled"`
+}
+
+func patchLicenseCustomerRotate(d AdminDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(chi.URLParam(r, "id"))
+		if err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "invalid id")
+			return
+		}
+		var in customerRotateIn
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		if err := d.Store.SetLicenseCustomerRotate(r.Context(), id, in.Enabled); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeJSONErr(w, http.StatusNotFound, "license not found")
+				return
+			}
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		// Re-read so the response carries the freshly-updated row (and any
+		// future fields updated by the same setter).
+		l, err := d.Store.GetLicense(r.Context(), id)
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s := agoidc.SessionFrom(r.Context())
+		resourceName := l.LicenseID
+		if in.Enabled {
+			resourceName += " (enabled)"
+		} else {
+			resourceName += " (disabled)"
+		}
+		d.Auditor.LogResourceMutation(actorEmail(s), "license.customer_rotate.update", "license", l.ID.String(), resourceName, clientIP(r))
+		writeJSON(w, http.StatusOK, licenseToDTO(l))
 	}
 }
 
@@ -822,12 +871,13 @@ func createLicense(d AdminDeps) http.HandlerFunc {
 			return
 		}
 		row := &store.License{
-			ID:           uuid.New(),
-			LicenseID:    parsed.ID,
-			Customer:     parsed.Customer,
-			Organization: parsed.Organization,
-			Tier:         parsed.Tier,
-			LicBlob:      in.LicBlob,
+			ID:                    uuid.New(),
+			LicenseID:             parsed.ID,
+			Customer:              parsed.Customer,
+			Organization:          parsed.Organization,
+			Tier:                  parsed.Tier,
+			LicBlob:               in.LicBlob,
+			CustomerRotateEnabled: true,
 		}
 		if exp, ok := parseLicenseExpiry(parsed); ok {
 			row.ExpiresAt = &exp

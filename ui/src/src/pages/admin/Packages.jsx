@@ -392,7 +392,7 @@ function PackageModal({ open, onClose, initial, creds, onSaved }) {
           label="Path *"
           value={form.path}
           onChange={set('path')}
-          placeholder={isRelease ? 'cnak' : 'cnak-us/cnak-core'}
+          placeholder={isRelease ? 'cnak' : 'containers/cnak-core'}
           hint="Slug-style path under the gateway hostname (no leading slash). Used in download URLs."
         />
 
@@ -454,7 +454,13 @@ function PackageModal({ open, onClose, initial, creds, onSaved }) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setUpstreamMode('multi')}
+                  onClick={() => {
+                    // Clear form.upstream_repo when switching to multi —
+                    // the input is hidden in this mode, so leftover state
+                    // would silently be persisted by the save handler.
+                    setForm((f) => ({ ...f, upstream_repo: '' }));
+                    setUpstreamMode('multi');
+                  }}
                   className={`px-3 py-1.5 border-l border-g-border-medium ${
                     upstreamMode === 'multi'
                       ? 'bg-g-accent-main text-white'

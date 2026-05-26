@@ -350,12 +350,13 @@ func issueLicense(d AdminDeps) http.HandlerFunc {
 		}
 
 		row := &store.License{
-			ID:           uuid.New(),
-			LicenseID:    lic.ID,
-			Customer:     lic.Customer,
-			Organization: lic.Organization,
-			Tier:         lic.Tier,
-			LicBlob:      blob,
+			ID:                    uuid.New(),
+			LicenseID:             lic.ID,
+			Customer:              lic.Customer,
+			Organization:          lic.Organization,
+			Tier:                  lic.Tier,
+			LicBlob:               blob,
+			CustomerRotateEnabled: true,
 		}
 		if exp, ok := parseLicenseExpiry(lic); ok {
 			row.ExpiresAt = &exp

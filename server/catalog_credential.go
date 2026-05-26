@@ -22,13 +22,19 @@ type catalogCredentialDTO struct {
 	CreatedAt  string `json:"created_at"`
 	LastUsedAt string `json:"last_used_at,omitempty"`
 	ExpiresAt  string `json:"expires_at,omitempty"`
+	// CustomerRotateEnabled mirrors the license's customer_rotate_enabled
+	// flag. When false the UI should hide / disable the "Rotate" CTA for
+	// non-impersonating sessions and the server enforces the same in
+	// handleCatalogRotateCredential.
+	CustomerRotateEnabled bool `json:"customer_rotate_enabled"`
 }
 
-func toCredentialDTO(licenseID uuid.UUID, ct *store.CustomerToken) catalogCredentialDTO {
+func toCredentialDTO(lic *store.License, ct *store.CustomerToken) catalogCredentialDTO {
 	out := catalogCredentialDTO{
-		LicenseID: licenseID.String(),
-		TokenID:   ct.TokenID,
-		CreatedAt: ct.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		LicenseID:             lic.ID.String(),
+		TokenID:               ct.TokenID,
+		CreatedAt:             ct.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		CustomerRotateEnabled: lic.CustomerRotateEnabled,
 	}
 	if ct.LastUsedAt != nil {
 		out.LastUsedAt = ct.LastUsedAt.UTC().Format("2006-01-02T15:04:05Z")
@@ -92,8 +98,9 @@ func handleCatalogGetCredential(d CatalogDeps) http.HandlerFunc {
 		ct, err := d.Store.ListActiveCustomerTokenForLicense(r.Context(), lic.ID)
 		if errors.Is(err, store.ErrNotFound) {
 			writeJSON(w, http.StatusOK, map[string]any{
-				"license_id": lic.ID.String(),
-				"token_id":   nil,
+				"license_id":              lic.ID.String(),
+				"token_id":                nil,
+				"customer_rotate_enabled": lic.CustomerRotateEnabled,
 			})
 			return
 		}
@@ -101,7 +108,7 @@ func handleCatalogGetCredential(d CatalogDeps) http.HandlerFunc {
 			writeJSONErr(w, http.StatusInternalServerError, "credential lookup: "+err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, toCredentialDTO(lic.ID, ct))
+		writeJSON(w, http.StatusOK, toCredentialDTO(lic, ct))
 	}
 }
 
@@ -124,6 +131,23 @@ func handleCatalogRotateCredential(d CatalogDeps) http.HandlerFunc {
 			return
 		}
 		id := catalogFromCtx(r.Context())
+
+		// Per-license toggle: when customer_rotate_enabled is false, only an
+		// admin impersonating the license may rotate. Real customers are
+		// denied with 403 and the attempt is audited so support can see who
+		// tried while the toggle is off.
+		if !lic.CustomerRotateEnabled && id.Impersonator == "" {
+			d.Auditor.Log(audit.AuditEvent{
+				Username:     id.TokenID,
+				Action:       "rotate.denied",
+				ResourceType: "customer-token",
+				ResourceID:   lic.ID.String(),
+				IPAddress:    clientIP(r),
+				Status:       "denied",
+			})
+			writeJSONErr(w, http.StatusForbidden, "credential rotation is disabled for this license; contact an admin")
+			return
+		}
 
 		gen, err := auth.GenerateCustomerToken()
 		if err != nil {

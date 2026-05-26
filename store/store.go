@@ -131,9 +131,14 @@ type License struct {
 	RevokedAt    *time.Time
 	// Source tags the row owner: '' (legacy / admin-UI-created) or 'manifest'
 	// (manifest-reconciler-owned). Prune passes only touch 'manifest' rows.
-	Source    string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	Source string
+	// CustomerRotateEnabled toggles whether the licensee can self-rotate
+	// their own customer credential from the catalog. Defaults to true at
+	// the schema layer so existing rows keep current behavior; demo/shared
+	// licenses get flipped to false by an admin or via the manifest.
+	CustomerRotateEnabled bool
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 // Branding is the admin-editable white-label override stored in the singleton
@@ -284,6 +289,9 @@ type DataStore interface {
 	InsertLicense(ctx context.Context, l *License) error
 	RevokeLicense(ctx context.Context, id uuid.UUID) error
 	DeleteLicense(ctx context.Context, id uuid.UUID) error
+	// SetLicenseCustomerRotate flips the per-license customer_rotate_enabled
+	// toggle. Returns ErrNotFound when id is missing.
+	SetLicenseCustomerRotate(ctx context.Context, id uuid.UUID, enabled bool) error
 
 	// customer tokens
 	ListCustomerTokens(ctx context.Context, licenseID *uuid.UUID) ([]CustomerToken, error)

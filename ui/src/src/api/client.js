@@ -111,6 +111,10 @@ export const admin = {
   uploadLicense: (licBlob) => api.post('/api/v1/licenses', { lic_blob: licBlob }),
   issueLicense: (body) => api.post('/api/v1/licenses/issue', body),
   revokeLicense: (id) => api.delete(`/api/v1/licenses/${id}`),
+  // Flip the per-license "customer can self-rotate" toggle. Returns the full
+  // updated license DTO; callers should replace the row from the response.
+  updateLicenseCustomerRotate: (id, enabled) =>
+    api.patch(`/api/v1/licenses/${id}/customer-rotate`, { enabled }),
   getLicenseGrants: (id) => api.get(`/api/v1/licenses/${id}/grants`),
   putLicenseGrants: (id, grants) => api.put(`/api/v1/licenses/${id}/grants`, { grants }),
   listContacts: (licenseId) => api.get(`/api/v1/licenses/${licenseId}/contacts`),

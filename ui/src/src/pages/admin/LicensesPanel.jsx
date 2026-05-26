@@ -202,10 +202,20 @@ function LicenseDrawer({ id, onClose, onChanged }) {
   const [contactName, setContactName] = useState('');
   const [contactBusy, setContactBusy] = useState(false);
   const [err, setErr] = useState(null);
-  const [adding, setAdding] = useState('');
+  // Set of package IDs queued in the "Add package grant" multi-picker. We use
+  // a Set (not array) so toggling a checkbox is O(1) regardless of list size.
+  const [selectedToAdd, setSelectedToAdd] = useState(() => new Set());
+  const [grantBusy, setGrantBusy] = useState(false);
 
   useEffect(() => {
-    if (!id) { setLic(null); setGrants([]); setContacts([]); return; }
+    if (!id) {
+      setLic(null); setGrants([]); setContacts([]);
+      // Also clear the contact-form inputs so reopening the drawer for
+      // another license doesn't preserve a half-typed email/name from the
+      // previous session.
+      setContactEmail(''); setContactName(''); setSelectedToAdd(new Set());
+      return;
+    }
     setErr(null);
     Promise.all([
       admin.getLicense(id),
@@ -232,10 +242,33 @@ function LicenseDrawer({ id, onClose, onChanged }) {
   };
 
   const removeGrant = (pkgId) => updateGrants(grants.filter((g) => g.package_id !== pkgId));
-  const addGrant = () => {
-    if (!adding) return;
-    updateGrants([...grants, { package_id: adding, actions: ['pull'] }]);
-    setAdding('');
+
+  const toggleSelected = (pkgId) => {
+    setSelectedToAdd((prev) => {
+      const next = new Set(prev);
+      if (next.has(pkgId)) next.delete(pkgId);
+      else next.add(pkgId);
+      return next;
+    });
+  };
+  const selectAllAvailable = () => setSelectedToAdd(new Set(available.map((p) => p.id)));
+  const clearSelection = () => setSelectedToAdd(new Set());
+
+  const addGrants = async () => {
+    if (selectedToAdd.size === 0) return;
+    setGrantBusy(true);
+    try {
+      const next = [
+        ...grants,
+        ...available
+          .filter((p) => selectedToAdd.has(p.id))
+          .map((p) => ({ package_id: p.id, actions: ['pull'] })),
+      ];
+      await updateGrants(next);
+      setSelectedToAdd(new Set());
+    } finally {
+      setGrantBusy(false);
+    }
   };
 
   // Mirror the backend regex so we surface bad input as a toast before the
@@ -323,17 +356,61 @@ function LicenseDrawer({ id, onClose, onChanged }) {
           </div>
 
           <div>
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-g-text-secondary mb-2">Add package grant</h4>
-            <div className="flex gap-2">
-              <Select
-                value={adding}
-                onChange={(e) => setAdding(e.target.value)}
-                placeholder="— select package —"
-                options={available.map((p) => ({ value: p.id, label: p.display_name || p.slug }))}
-                className="flex-1"
-              />
-              <Button variant="primary" onClick={addGrant} disabled={!adding}>Grant</Button>
+            <div className="flex items-baseline justify-between gap-3 mb-2">
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-g-text-secondary">Add package grant</h4>
+              {available.length > 0 && (
+                <div className="flex items-center gap-3 text-xs">
+                  <button
+                    type="button"
+                    onClick={selectedToAdd.size === available.length ? clearSelection : selectAllAvailable}
+                    className="text-g-accent-text hover:underline"
+                  >
+                    {selectedToAdd.size === available.length ? 'Clear' : `Select all (${available.length})`}
+                  </button>
+                </div>
+              )}
             </div>
+            {available.length === 0 ? (
+              <div className="text-sm text-g-text-secondary">All packages are already granted.</div>
+            ) : (
+              <>
+                <div className="max-h-64 overflow-y-auto border border-g-border-weak rounded divide-y divide-g-border-weak">
+                  {available.map((p) => {
+                    const checked = selectedToAdd.has(p.id);
+                    return (
+                      <label
+                        key={p.id}
+                        className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-g-hover"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleSelected(p.id)}
+                          className="rounded border-g-border-medium bg-g-secondary text-g-accent-main focus:ring-g-accent-main/40"
+                        />
+                        <span className="flex-1 truncate">{p.display_name || p.slug}</span>
+                        {p.display_name && (
+                          <span className="text-xs text-g-text-secondary font-mono truncate">{p.slug}</span>
+                        )}
+                      </label>
+                    );
+                  })}
+                </div>
+                <div className="mt-2 flex justify-end">
+                  <Button
+                    variant="primary"
+                    onClick={addGrants}
+                    disabled={selectedToAdd.size === 0 || grantBusy}
+                  >
+                    {grantBusy
+                      ? 'Granting…'
+                      : selectedToAdd.size <= 1
+                        ? 'Grant'
+                        : `Grant ${selectedToAdd.size} packages`}
+                  </Button>
+                </div>
+              </>
+            )}
           </div>
 
           <div>
@@ -468,6 +545,14 @@ function GenerateModal({ open, onClose, onIssued }) {
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
+  // Switching expiry_choice away from 'custom' hides the expires_at input;
+  // clear its stored value too so a stale RFC3339 string doesn't pop back
+  // into view if the operator toggles back to 'custom'.
+  const setExpiryChoice = (e) => {
+    const next = e.target.value;
+    setForm((f) => ({ ...f, expiry_choice: next, expires_at: next === 'custom' ? f.expires_at : '' }));
+  };
+
   // Attribute editor helpers — kept tiny since the underlying state is a
   // plain ordered list of {key, value} entries.
   const addAttr   = ()      => setAttrs((rows) => [...rows, { key: '', value: '' }]);
@@ -601,7 +686,7 @@ function GenerateModal({ open, onClose, onIssued }) {
           <Input label="POC name" value={form.poc_name} onChange={set('poc_name')} placeholder="Jane Doe" />
           <Input label="POC email" value={form.poc_email} onChange={set('poc_email')} placeholder="jane@acme.example" />
           <Select label="Tier *" value={form.tier} onChange={set('tier')} options={TIER_OPTS} />
-          <Select label="Expiry" value={form.expiry_choice} onChange={set('expiry_choice')} options={EXPIRY_OPTS} />
+          <Select label="Expiry" value={form.expiry_choice} onChange={setExpiryChoice} options={EXPIRY_OPTS} />
           {form.expiry_choice === 'custom' && (
             <Input label="Expires at (RFC3339)" value={form.expires_at} onChange={set('expires_at')} placeholder="2027-01-01T00:00:00Z" />
           )}

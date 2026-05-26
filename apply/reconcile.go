@@ -596,14 +596,36 @@ func reconcileLicenses(
 
 		if prev, ok := byLicenseID[parsed.ID]; ok {
 			out[parsed.ID] = prev.ID
-			// Licenses are immutable apart from revocation; if the blob is
-			// identical it's a noop, otherwise we surface that the blob
-			// changed (we don't rewrite — re-importing a license is rare and
-			// safer handled deliberately by the admin).
-			if prev.LicBlob == s.LicBlob {
+			// Licenses are immutable apart from revocation and a small set of
+			// admin-toggleable flags (today: CustomerRotateEnabled). If the
+			// blob is identical and no flag changed it's a noop; otherwise we
+			// surface the diff. We don't rewrite the blob — re-importing a
+			// license is rare and safer handled deliberately by the admin.
+			diff := diffLicense(&prev, s)
+			if prev.LicBlob != s.LicBlob {
+				diff = append(diff, "lic_blob (changed; reimport not auto-applied)")
+			}
+			if len(diff) == 0 {
 				rep.Items = append(rep.Items, ApplyItem{Kind: KindLicense, Name: parsed.ID, Action: ActionNoop})
 			} else {
-				rep.Items = append(rep.Items, ApplyItem{Kind: KindLicense, Name: parsed.ID, Action: ActionNoop, Diff: []string{"lic_blob (changed; reimport not auto-applied)"}})
+				if opts.DryRun {
+					rep.Items = append(rep.Items, ApplyItem{Kind: KindLicense, Name: parsed.ID, Action: ActionUpdate, Diff: diff})
+					continue
+				}
+				// Intentionally surgical: customer_rotate_enabled is the only
+				// license field the manifest can mutate in place. lic_blob /
+				// customer / tier / etc. remain insert-only — reimporting a
+				// license is a deliberate admin act, not a reconcile side
+				// effect. If more toggles become manifest-mutable, add them
+				// here one by one rather than introducing a generic
+				// UpdateLicense path.
+				if s.CustomerRotateEnabled != nil && prev.CustomerRotateEnabled != *s.CustomerRotateEnabled {
+					if err := st.SetLicenseCustomerRotate(ctx, prev.ID, *s.CustomerRotateEnabled); err != nil {
+						rep.Errors = append(rep.Errors, ApplyError{Kind: KindLicense, Name: parsed.ID, Message: err.Error()})
+						continue
+					}
+				}
+				rep.Items = append(rep.Items, ApplyItem{Kind: KindLicense, Name: parsed.ID, Action: ActionUpdate, Diff: diff})
 			}
 			continue
 		}
@@ -613,14 +635,20 @@ func reconcileLicenses(
 			rep.Items = append(rep.Items, ApplyItem{Kind: KindLicense, Name: parsed.ID, Action: ActionCreate})
 			continue
 		}
+		// nil spec field on create → schema default (TRUE). Explicit value wins.
+		customerRotate := true
+		if s.CustomerRotateEnabled != nil {
+			customerRotate = *s.CustomerRotateEnabled
+		}
 		row := &store.License{
-			ID:           uuid.New(),
-			LicenseID:    parsed.ID,
-			Customer:     parsed.Customer,
-			Organization: parsed.Organization,
-			Tier:         parsed.Tier,
-			LicBlob:      s.LicBlob,
-			Source:       sourceManifest,
+			ID:                    uuid.New(),
+			LicenseID:             parsed.ID,
+			Customer:              parsed.Customer,
+			Organization:          parsed.Organization,
+			Tier:                  parsed.Tier,
+			LicBlob:               s.LicBlob,
+			Source:                sourceManifest,
+			CustomerRotateEnabled: customerRotate,
 		}
 		if exp, ok := parseLicenseExpiry(parsed); ok {
 			row.ExpiresAt = &exp
@@ -666,6 +694,22 @@ func pruneLicenses(
 		}
 		rep.Items = append(rep.Items, ApplyItem{Kind: KindLicense, Name: prev.LicenseID, Action: ActionDelete})
 	}
+}
+
+// diffLicense returns the manifest-managed flag fields that changed between an
+// existing row and a spec. nil pointer fields on the spec mean "leave the
+// existing value alone" — they never produce a diff entry. Mirrors
+// diffPackage's naming convention (snake_case, matches DB column names).
+//
+// lic_blob is intentionally NOT diffed here — the caller handles it with its
+// own "changed; reimport not auto-applied" note since reimport semantics are
+// distinct from a routine field flip.
+func diffLicense(prev *store.License, next LicenseSpec) []string {
+	var d []string
+	if next.CustomerRotateEnabled != nil && prev.CustomerRotateEnabled != *next.CustomerRotateEnabled {
+		d = append(d, "customer_rotate_enabled")
+	}
+	return d
 }
 
 // parseLicenseExpiry duplicates server/admin.go's helper to keep the apply

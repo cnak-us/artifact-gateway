@@ -351,7 +351,7 @@ var _ = Describe("Reconcile", func() {
 
 		It("LEAVES admin-UI-created licenses (source='') alone when pruning", func() {
 			Expect(st.InsertLicense(ctx, &store.License{
-				ID: uuid.New(), LicenseID: "lic_admin", Customer: "Admin", LicBlob: "blob", Source: "",
+				ID: uuid.New(), LicenseID: "lic_admin", Customer: "Admin", LicBlob: "blob", Source: "", CustomerRotateEnabled: true,
 			})).To(Succeed())
 
 			mf := &apply.Manifest{

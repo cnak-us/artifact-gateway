@@ -98,9 +98,16 @@ type ContainerSpec struct {
 // LicenseSpec is a raw .lic blob plus optional manifest-managed metadata such
 // as the federated-login contact allowlist. The cnaklic license ID is
 // extracted by the reconciler from the signed payload.
+//
+// CustomerRotateEnabled is a pointer so the field is genuinely tri-state:
+//   - unset (nil): on create, default to TRUE (matches the DB schema default);
+//     on update, leave the existing row's value alone so admin-UI toggles
+//     aren't silently flipped by a reapply that doesn't mention the field.
+//   - non-nil:     write that value.
 type LicenseSpec struct {
-	LicBlob  string        `yaml:"licBlob"            json:"licBlob"`
-	Contacts []ContactSpec `yaml:"contacts,omitempty" json:"contacts,omitempty"`
+	LicBlob               string        `yaml:"licBlob"                         json:"licBlob"`
+	CustomerRotateEnabled *bool         `yaml:"customerRotateEnabled,omitempty" json:"customerRotateEnabled,omitempty"`
+	Contacts              []ContactSpec `yaml:"contacts,omitempty"              json:"contacts,omitempty"`
 }
 
 // ContactSpec is one federated-login contact for a license. Email is matched

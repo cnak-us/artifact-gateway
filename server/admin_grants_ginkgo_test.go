@@ -113,6 +113,9 @@ func (*grantsFakeStore) GetLicenseByLicenseID(context.Context, string) (*store.L
 func (*grantsFakeStore) InsertLicense(context.Context, *store.License) error { panic("unused") }
 func (*grantsFakeStore) RevokeLicense(context.Context, uuid.UUID) error      { panic("unused") }
 func (*grantsFakeStore) DeleteLicense(context.Context, uuid.UUID) error      { panic("unused") }
+func (*grantsFakeStore) SetLicenseCustomerRotate(context.Context, uuid.UUID, bool) error {
+	panic("unused")
+}
 func (*grantsFakeStore) ListCustomerTokens(context.Context, *uuid.UUID) ([]store.CustomerToken, error) {
 	panic("unused")
 }

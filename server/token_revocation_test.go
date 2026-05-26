@@ -166,6 +166,9 @@ func (storeAdapter) GetLicenseByLicenseID(context.Context, string) (*store.Licen
 func (storeAdapter) InsertLicense(context.Context, *store.License) error { panic("unused") }
 func (storeAdapter) RevokeLicense(context.Context, uuid.UUID) error      { panic("unused") }
 func (storeAdapter) DeleteLicense(context.Context, uuid.UUID) error      { panic("unused") }
+func (storeAdapter) SetLicenseCustomerRotate(context.Context, uuid.UUID, bool) error {
+	panic("unused")
+}
 func (storeAdapter) ListCustomerTokens(context.Context, *uuid.UUID) ([]store.CustomerToken, error) {
 	panic("unused")
 }

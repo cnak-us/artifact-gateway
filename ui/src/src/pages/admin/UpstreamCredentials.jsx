@@ -247,6 +247,33 @@ function CreateModal({ open, onClose, onSaved }) {
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const setBool = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.checked }));
 
+  // Reset peer fields when kind flips between PAT-style and issuer-style
+  // (or in/out of the kinds that need base_url / TLS overrides). Without
+  // this, a typed-then-hidden PAT or issuer_secret silently rides along in
+  // the save body — the server ignores it, but it leaks credentials into
+  // request logs and confuses anyone reopening the modal.
+  const setKind = (e) => {
+    const nextKind = e.target.value;
+    setForm((f) => {
+      const next = { ...f, kind: nextKind };
+      if (ISSUER_KINDS.has(nextKind)) {
+        next.username = '';
+        next.pat = '';
+      } else {
+        next.issuer_secret = '';
+        next.issuer_config = '';
+      }
+      const nextNeedsBaseURL = nextKind === 'oci-basic' || nextKind === 'gitlab' || nextKind === 'gitlab-api' || nextKind === 'gar' || nextKind === 'acr-aad';
+      const nextAllowsBaseURL = nextNeedsBaseURL || nextKind === 'quay';
+      if (!nextAllowsBaseURL) {
+        next.base_url = '';
+        next.ca_bundle_pem = '';
+        next.insecure_skip_tls_verify = false;
+      }
+      return next;
+    });
+  };
+
   const isIssuer = ISSUER_KINDS.has(form.kind);
   const needsBaseURL = form.kind === 'oci-basic' || form.kind === 'gitlab' || form.kind === 'gitlab-api' || form.kind === 'gar' || form.kind === 'acr-aad';
   const allowsBaseURL = needsBaseURL || form.kind === 'quay';
@@ -297,7 +324,7 @@ function CreateModal({ open, onClose, onSaved }) {
         <Select
           label="Kind"
           value={form.kind}
-          onChange={set('kind')}
+          onChange={setKind}
           options={KIND_OPTS}
           hint={KIND_HINTS[form.kind] || ''}
         />

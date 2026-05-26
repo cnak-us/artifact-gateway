@@ -237,6 +237,9 @@ func (*configApplyFakeStore) GetLicenseByLicenseID(context.Context, string) (*st
 	panic("unused")
 }
 func (*configApplyFakeStore) RevokeLicense(context.Context, uuid.UUID) error { panic("unused") }
+func (*configApplyFakeStore) SetLicenseCustomerRotate(context.Context, uuid.UUID, bool) error {
+	panic("unused")
+}
 func (*configApplyFakeStore) ListCustomerTokens(context.Context, *uuid.UUID) ([]store.CustomerToken, error) {
 	panic("unused")
 }

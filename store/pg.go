@@ -693,13 +693,14 @@ func (p *PG) ReplaceManifestContainersForPackage(ctx context.Context, packageID 
 
 // ---------- licenses ----------
 
-const licenseCols = `id, license_id, customer, organization, tier, expires_at, lic_blob, revoked_at, source, created_at, updated_at`
+const licenseCols = `id, license_id, customer, organization, tier, expires_at, lic_blob, revoked_at, source, customer_rotate_enabled, created_at, updated_at`
 
 func scanLicense(row pgx.Row) (*License, error) {
 	var l License
 	err := row.Scan(
 		&l.ID, &l.LicenseID, &l.Customer, &l.Organization, &l.Tier,
-		&l.ExpiresAt, &l.LicBlob, &l.RevokedAt, &l.Source, &l.CreatedAt, &l.UpdatedAt,
+		&l.ExpiresAt, &l.LicBlob, &l.RevokedAt, &l.Source, &l.CustomerRotateEnabled,
+		&l.CreatedAt, &l.UpdatedAt,
 	)
 	if err != nil {
 		return nil, mapErr(err)
@@ -718,7 +719,8 @@ func (p *PG) ListLicenses(ctx context.Context) ([]License, error) {
 		var l License
 		if err := rows.Scan(
 			&l.ID, &l.LicenseID, &l.Customer, &l.Organization, &l.Tier,
-			&l.ExpiresAt, &l.LicBlob, &l.RevokedAt, &l.Source, &l.CreatedAt, &l.UpdatedAt,
+			&l.ExpiresAt, &l.LicBlob, &l.RevokedAt, &l.Source, &l.CustomerRotateEnabled,
+			&l.CreatedAt, &l.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -747,10 +749,11 @@ func (p *PG) InsertLicense(ctx context.Context, l *License) error {
 	}
 	l.UpdatedAt = now
 	_, err := p.pool.Exec(ctx,
-		`INSERT INTO licenses (id, license_id, customer, organization, tier, expires_at, lic_blob, revoked_at, source, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		`INSERT INTO licenses (id, license_id, customer, organization, tier, expires_at, lic_blob, revoked_at, source, customer_rotate_enabled, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
 		l.ID, l.LicenseID, l.Customer, l.Organization, l.Tier,
-		l.ExpiresAt, l.LicBlob, l.RevokedAt, l.Source, l.CreatedAt, l.UpdatedAt,
+		l.ExpiresAt, l.LicBlob, l.RevokedAt, l.Source, l.CustomerRotateEnabled,
+		l.CreatedAt, l.UpdatedAt,
 	)
 	return err
 }
@@ -760,6 +763,21 @@ func (p *PG) RevokeLicense(ctx context.Context, id uuid.UUID) error {
 	tag, err := p.pool.Exec(ctx,
 		`UPDATE licenses SET revoked_at=$2, updated_at=$2 WHERE id=$1 AND revoked_at IS NULL`,
 		id, now)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetLicenseCustomerRotate toggles the customer_rotate_enabled flag for the
+// license row. Returns ErrNotFound when no row exists for id.
+func (p *PG) SetLicenseCustomerRotate(ctx context.Context, id uuid.UUID, enabled bool) error {
+	tag, err := p.pool.Exec(ctx,
+		`UPDATE licenses SET customer_rotate_enabled = $2, updated_at = now() WHERE id = $1`,
+		id, enabled)
 	if err != nil {
 		return err
 	}
@@ -1191,7 +1209,8 @@ func (p *PG) FindLicensesByContactEmail(ctx context.Context, email string) ([]Li
 	email = strings.ToLower(email)
 	rows, err := p.pool.Query(ctx,
 		`SELECT l.id, l.license_id, l.customer, l.organization, l.tier,
-		        l.expires_at, l.lic_blob, l.revoked_at, l.source, l.created_at, l.updated_at
+		        l.expires_at, l.lic_blob, l.revoked_at, l.source, l.customer_rotate_enabled,
+		        l.created_at, l.updated_at
 		 FROM licenses l
 		 INNER JOIN license_contacts c ON c.license_id = l.id
 		 WHERE c.email = $1 AND l.revoked_at IS NULL
@@ -1205,7 +1224,8 @@ func (p *PG) FindLicensesByContactEmail(ctx context.Context, email string) ([]Li
 		var l License
 		if err := rows.Scan(
 			&l.ID, &l.LicenseID, &l.Customer, &l.Organization, &l.Tier,
-			&l.ExpiresAt, &l.LicBlob, &l.RevokedAt, &l.Source, &l.CreatedAt, &l.UpdatedAt,
+			&l.ExpiresAt, &l.LicBlob, &l.RevokedAt, &l.Source, &l.CustomerRotateEnabled,
+			&l.CreatedAt, &l.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}

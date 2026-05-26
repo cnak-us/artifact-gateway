@@ -84,6 +84,20 @@ export default function Customers() {
     }
   };
 
+  // Flip the per-license customer-self-rotate flag. The PATCH endpoint is the
+  // only way to change this field (no generic license PUT), and it returns the
+  // full updated DTO — we splice that back into the licenses array so the row
+  // re-renders from the server-of-record without a full refetch.
+  const setCustomerRotateEnabled = async (license, enabled) => {
+    try {
+      const updated = await admin.updateLicenseCustomerRotate(license.id, enabled);
+      setLicenses((prev) => prev.map((l) => (l.id === license.id ? { ...l, ...updated } : l)));
+      toast.success(enabled ? 'Customer self-rotation enabled' : 'Customer self-rotation disabled');
+    } catch (e) {
+      toast.error(e.message);
+    }
+  };
+
   // Manual revoke kept as an escape hatch even though "rotate" now replaces
   // it as the everyday action. Useful when an admin wants the license to
   // have NO credential (e.g. customer offboarding).
@@ -132,6 +146,7 @@ export default function Customers() {
               busy={busyLic === license.id}
               onRotate={() => rotate({ ...license, active })}
               onRevoke={() => active && revoke(active)}
+              onToggleCustomerRotate={(enabled) => setCustomerRotateEnabled(license, enabled)}
             />
           ))}
         </div>
@@ -142,8 +157,20 @@ export default function Customers() {
   );
 }
 
-function LicenseCredentialRow({ license, active, history, busy, onRotate, onRevoke }) {
+function LicenseCredentialRow({ license, active, history, busy, onRotate, onRevoke, onToggleCustomerRotate }) {
   const [showHistory, setShowHistory] = useState(false);
+  const [rotateBusy, setRotateBusy] = useState(false);
+  // Default to true for back-compat with rows that haven't been migrated /
+  // licenses where the field was added after creation; the backend defaults
+  // existing rows to true so this matches the server contract.
+  const customerRotateEnabled = license.customer_rotate_enabled !== false;
+
+  const handleToggle = async (e) => {
+    const next = e.target.checked;
+    setRotateBusy(true);
+    try { await onToggleCustomerRotate(next); }
+    finally { setRotateBusy(false); }
+  };
 
   const historyColumns = [
     { key: 'token_id', header: 'Token ID', render: (t) => <span className="font-mono text-xs">{t.token_id}</span> },
@@ -163,14 +190,21 @@ function LicenseCredentialRow({ license, active, history, busy, onRotate, onRevo
             {license.tier && <Badge color="blue">{license.tier}</Badge>}
           </div>
         </div>
-        <Button
-          variant={active ? 'ghost' : 'primary'}
-          icon={active ? <MdRefresh /> : <MdAdd />}
-          onClick={onRotate}
-          disabled={busy}
-        >
-          {busy ? (active ? 'Rotating…' : 'Generating…') : (active ? 'Rotate' : 'Generate token')}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant={active ? 'ghost' : 'primary'}
+            icon={active ? <MdRefresh /> : <MdAdd />}
+            onClick={onRotate}
+            disabled={busy}
+          >
+            {busy ? (active ? 'Rotating…' : 'Generating…') : (active ? 'Rotate' : 'Generate token')}
+          </Button>
+          {active && (
+            <Button variant="danger" icon={<MdDelete />} onClick={onRevoke} disabled={busy}>
+              Revoke without replacement
+            </Button>
+          )}
+        </div>
       </div>
 
       <div className="px-4 py-3 text-sm">
@@ -182,15 +216,26 @@ function LicenseCredentialRow({ license, active, history, busy, onRotate, onRevo
             <Row label="Expires"     value={active.expires_at ? new Date(active.expires_at).toLocaleString() : 'never'} />
             <Row label="Last used"   value={active.last_used_at ? new Date(active.last_used_at).toLocaleString() : 'never'} />
             <Row label="Description" value={active.description || '—'} />
-            <div className="md:col-span-2 pt-2">
-              <Button variant="danger" icon={<MdDelete />} onClick={onRevoke}>
-                Revoke without replacement
-              </Button>
-            </div>
           </div>
         ) : (
           <p className="text-g-text-secondary">No active credential.</p>
         )}
+      </div>
+
+      <div className="px-4 py-3 border-t border-g-border-weak">
+        <label className="flex items-center gap-2 text-sm text-g-text select-none">
+          <input
+            type="checkbox"
+            checked={customerRotateEnabled}
+            onChange={handleToggle}
+            disabled={rotateBusy}
+            className="rounded border-g-border-medium bg-g-secondary text-g-accent-main focus:ring-g-accent-main/40"
+          />
+          <span>Allow customer to rotate their own credential</span>
+        </label>
+        <p className="mt-1 ml-6 text-xs text-g-text-secondary">
+          When off, only an admin can rotate this license's credential. Useful for shared demo licenses.
+        </p>
       </div>
 
       {history.length > 0 && (

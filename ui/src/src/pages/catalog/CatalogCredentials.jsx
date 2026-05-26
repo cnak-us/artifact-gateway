@@ -118,6 +118,13 @@ export default function CatalogCredentials() {
 //   error     — fetch/rotate failed; "Try again" button
 // After a successful create/rotate the plaintext secret is shown in a Modal;
 // dismissing the modal refetches metadata so the card returns to `active`.
+// Shown as the disabled-button tooltip and as the secondary hint underneath
+// the button when the admin has turned off customer self-rotation for this
+// license. We intentionally keep the button visible (just disabled) so the
+// affordance is discoverable — see the team design note.
+const ROTATE_DISABLED_HINT =
+  'Credential rotation is disabled by admin. Contact support if you need a new credential.';
+
 function LicenseCredentialCard({ license }) {
   const confirm = useConfirm();
   const [status, setStatus] = useState('loading');
@@ -125,6 +132,9 @@ function LicenseCredentialCard({ license }) {
   const [err, setErr] = useState(null);
   const [pending, setPending] = useState(false);
   const [revealed, setRevealed] = useState(null); // { token_id, secret, full_credential }
+  // Default to true when the field is absent (older server, transient race)
+  // so we never lock the user out due to a missing flag.
+  const customerRotateEnabled = data?.customer_rotate_enabled !== false;
 
   const refresh = useCallback(async () => {
     setStatus('loading');
@@ -132,7 +142,10 @@ function LicenseCredentialCard({ license }) {
     try {
       const res = await catalog.getCredential(license.id);
       if (!res || !res.token_id) {
-        setData(null);
+        // Preserve the "no active token" payload (it still carries
+        // customer_rotate_enabled) so the disabled-button hint can render
+        // in the none-state too.
+        setData(res || null);
         setStatus('none');
       } else {
         setData(res);
@@ -193,12 +206,24 @@ function LicenseCredentialCard({ license }) {
         </div>
         <div className="flex items-center gap-2">
           {status === 'active' && (
-            <Button variant="ghost" onClick={rotate} disabled={pending} icon={<MdRefresh />}>
+            <Button
+              variant="ghost"
+              onClick={rotate}
+              disabled={pending || !customerRotateEnabled}
+              icon={<MdRefresh />}
+              title={!customerRotateEnabled ? ROTATE_DISABLED_HINT : undefined}
+            >
               {pending ? 'Rotating…' : 'Rotate'}
             </Button>
           )}
           {status === 'none' && (
-            <Button variant="primary" onClick={rotate} disabled={pending} icon={<MdAdd />}>
+            <Button
+              variant="primary"
+              onClick={rotate}
+              disabled={pending || !customerRotateEnabled}
+              icon={<MdAdd />}
+              title={!customerRotateEnabled ? ROTATE_DISABLED_HINT : undefined}
+            >
               {pending ? 'Creating…' : 'Create credential'}
             </Button>
           )}
@@ -224,6 +249,9 @@ function LicenseCredentialCard({ license }) {
         )}
         {status === 'error' && (
           <Button variant="ghost" onClick={refresh}>Try again</Button>
+        )}
+        {(status === 'active' || status === 'none') && !customerRotateEnabled && (
+          <p className="mt-3 text-xs text-g-text-secondary">{ROTATE_DISABLED_HINT}</p>
         )}
       </div>
 
