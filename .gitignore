@@ -18,3 +18,4 @@ certs/
 chart/charts/
 *.tgz
 /chart/values-do.yaml
+/config/cnak-us.yaml
