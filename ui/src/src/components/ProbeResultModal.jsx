@@ -28,18 +28,60 @@ export default function ProbeResultModal({
       footer={<Button variant="secondary" onClick={onClose}>Close</Button>}
     >
       <div className="space-y-4">
-        <StatusBanner loading={loading} result={result} error={error} />
-
-        {!loading && !error && result && (
+        {!loading && !error && result && result.multi_container ? (
+          <MultiContainerResult containers={result.containers} />
+        ) : (
           <>
-            <RequestLine result={result} />
-            <Summary text={result.summary} />
-            <HeadersSection headers={result.headers} />
-            <BodySection body={result.body} />
+            <StatusBanner loading={loading} result={result} error={error} />
+
+            {!loading && !error && result && (
+              <>
+                <RequestLine result={result} />
+                <Summary text={result.summary} />
+                <HeadersSection headers={result.headers} />
+                <BodySection body={result.body} />
+              </>
+            )}
           </>
         )}
       </div>
     </Modal>
+  );
+}
+
+function MultiContainerResult({ containers }) {
+  const rows = Array.isArray(containers) ? containers : [];
+  if (rows.length === 0) {
+    return (
+      <p className="text-sm text-g-text-secondary italic">
+        Multi-container package with no containers configured. Add at least one container row to probe it.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-4">
+      {rows.map((c) => {
+        const ok = !!(c.result && c.result.ok);
+        const statusText = c.result?.status_text || (c.result?.status ? String(c.result.status) : '—');
+        const latency = typeof c.result?.duration_ms === 'number' ? `${c.result.duration_ms} ms` : null;
+        return (
+          <section key={c.alias} className="border border-g-border-weak rounded p-3 space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Badge color={ok ? 'green' : 'red'} className="text-xs px-2 py-0.5">{statusText}</Badge>
+                <span className="font-mono text-sm">{c.alias}</span>
+                {c.display_name && (
+                  <span className="text-xs text-g-text-secondary">{c.display_name}</span>
+                )}
+              </div>
+              {latency && <span className="text-xs text-g-text-secondary font-mono">({latency})</span>}
+            </div>
+            <RequestLine result={c.result || {}} />
+            <Summary text={c.result?.summary} />
+          </section>
+        );
+      })}
+    </div>
   );
 }
 

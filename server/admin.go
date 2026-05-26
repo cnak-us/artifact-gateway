@@ -699,14 +699,20 @@ func patchPackage(d AdminDeps) http.HandlerFunc {
 		if in.InstallInstructionsMD != "" {
 			existing.InstallInstructionsMD = in.InstallInstructionsMD
 		}
-		if in.UpstreamRepo != "" {
-			existing.UpstreamRepo = in.UpstreamRepo
-		}
 		if in.UpstreamCredentialID != uuid.Nil {
 			existing.UpstreamCredentialID = in.UpstreamCredentialID
 		}
 		if in.Source != "" {
 			existing.Source = in.Source
+		}
+		// UpstreamRepo: for OCI packages an empty string is meaningful
+		// (multi-container mode — child container rows carry the upstreams),
+		// so don't gate on "". For release sources upstream_repo is unused,
+		// so the empty-as-not-supplied convention is preserved there.
+		if existing.Source == "" || existing.Source == "oci" {
+			existing.UpstreamRepo = in.UpstreamRepo
+		} else if in.UpstreamRepo != "" {
+			existing.UpstreamRepo = in.UpstreamRepo
 		}
 		if in.GitHubRepo != "" {
 			existing.GitHubRepo = in.GitHubRepo

@@ -727,6 +727,13 @@ func probeOCITagListRepo(r *http.Request, upstreamRepo string, cred *store.Upstr
 	if host == "" {
 		return probeResult{OK: false, Method: http.MethodGet, Summary: "no base URL resolved for credential"}
 	}
+	if strings.TrimSpace(upstreamRepo) == "" {
+		return probeResult{
+			OK:      false,
+			Method:  http.MethodGet,
+			Summary: "no upstream repo configured — set the package's upstream_repo (single-container) or add container rows (multi-container)",
+		}
+	}
 	url := fmt.Sprintf("%s/v2/%s/tags/list?n=100", host, upstreamRepo)
 	client := newProbeClientForCred(cred)
 	start := time.Now()

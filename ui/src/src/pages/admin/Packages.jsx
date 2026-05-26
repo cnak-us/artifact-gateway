@@ -238,9 +238,14 @@ function PackageModal({ open, onClose, initial, creds, onSaved }) {
     setErr(null);
     setContainers([]);
     setContainersLoaded(false);
-    // Default the mode: existing packages with container rows ⇒ multi.
-    // Re-fetched below; this is just the optimistic initial state.
-    setUpstreamMode('single');
+    // Multi-container packages have an empty packages.upstream_repo — the
+    // container rows carry the upstreams. Infer the mode synchronously from
+    // that so re-opening an existing multi package shows "Multi" immediately,
+    // even before listPackageContainers resolves (and even when the operator
+    // saved the package but hasn't added container rows yet).
+    const isOCI = base.source === 'oci';
+    const inferMulti = isOCI && base.id && !base.upstream_repo;
+    setUpstreamMode(inferMulti ? 'multi' : 'single');
 
     if (base.id) {
       admin.listPackageContainers(base.id)
